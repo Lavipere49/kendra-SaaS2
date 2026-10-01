@@ -1,0 +1,753 @@
+const router = require("express").Router();
+const { getDb, timestamp } = require("../config/firebase");
+const { PLANS } = require("../config/plans");
+
+function normalize(value) {
+  if (value && typeof value.toDate === "function") {
+    return value.toDate().toISOString();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(normalize);
+  }
+
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      out[key] = normalize(val);
+    }
+    return out;
+  }
+
+  return value;
+}
+
+async function getAll(collection) {
+  const snap = await getDb().collection(collection).get();
+  return snap.docs.map(doc => normalize({ id: doc.id, ...doc.data() }));
+}
+
+async function getSettings() {
+  const db = getDb();
+  const [adminSnap, kendraSnap, mfSnap] = await Promise.all([
+    db.collection("settings").doc("admin").get(),
+    db.collection("settings").doc("kendra").get(),
+    db.collection("settings").doc("moneyfusion").get()
+  ]);
+
+  return {
+    ...(adminSnap.exists ? adminSnap.data() : {}),
+    ...(kendraSnap.exists ? kendraSnap.data() : {}),
+    moneyfusionConfigured:
+      Boolean(process.env.MONEYFUSION_API_URL) &&
+      Boolean(process.env.MONEYFUSION_PRIVATE_KEY),
+    version: "4.0.0"
+  };
+}
+
+/*
+ * Le frontend Admin existant n'envoyait pas x-admin-key.
+ * On garde donc le branchement fonctionnel sans inventer un nouveau
+ * système de connexion ou modifier le frontend.
+ *
+ * Si ADMIN_API_KEY est défini, les requêtes Admin doivent fournir
+ * x-admin-key. Cela permet de sécuriser le backend en production.
+ */
+function requireAdmin(req, res, next) {
+  const configuredKey = process.env.ADMIN_API_KEY;
+
+  if (!configuredKey) {
+    return next();
+  }
+
+  if (req.headers["x-admin-key"] !== configuredKey) {
+    return res.status(401).json({
+      success: false,
+      error: "ADMIN_NON_AUTORISE"
+    });
+  }
+
+  next();
+}
+
+router.use(requireAdmin);
+
+/* =========================
+   DASHBOARD
+========================= */
+
+router.get("/dashboard", async (req, res) => {
+  try {
+    const db = getDb();
+
+    const [shops, products, orders] = await Promise.all([
+      db.collection("shops").get(),
+      db.collection("products").get(),
+      db.collection("orders").get()
+    ]);
+
+    const vendors = new Set(
+      shops.docs
+        .map(d => d.data().ownerId)
+        .filter(Boolean)
+    ).size;
+
+    res.json({
+      success: true,
+      vendors,
+      shops: shops.size,
+      products: products.size,
+      orders: orders.size
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/subscriptions/summary", async (req, res) => {
+  try {
+    const subscriptions = await getAll("subscriptions");
+    const now = Date.now();
+
+    let active = 0;
+    let pending = 0;
+    let expired = 0;
+
+    for (const subscription of subscriptions) {
+      if (subscription.status === "pending") {
+        pending++;
+        continue;
+      }
+
+      const expires = subscription.expiresAt
+        ? new Date(subscription.expiresAt).getTime()
+        : null;
+
+      if (subscription.status === "active" && (!expires || expires > now)) {
+        active++;
+      } else {
+        expired++;
+      }
+    }
+
+    res.json({ success: true, active, pending, expired });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   VENDEURS
+========================= */
+
+router.get("/vendors", async (req, res) => {
+  try {
+    const shops = await getAll("shops");
+
+    const grouped = new Map();
+
+    for (const shop of shops) {
+      const id = String(shop.ownerId || shop.id);
+
+      if (!grouped.has(id)) {
+        grouped.set(id, {
+          id,
+          name: shop.ownerName || shop.ownerEmail || "Vendeur",
+          email: shop.ownerEmail || shop.email || "",
+          phone: shop.ownerPhone || shop.phone || "",
+          shopName: shop.name || "",
+          status: shop.status || (shop.active === false ? "suspended" : "active"),
+          createdAt: shop.createdAt || null,
+          shopsCount: 0
+        });
+      }
+
+      grouped.get(id).shopsCount++;
+    }
+
+    res.json({
+      success: true,
+      vendors: [...grouped.values()]
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.patch("/vendors/:vendorId/status", async (req, res) => {
+  try {
+    const status = String(req.body.status || "").trim();
+
+    if (!["active", "pending", "suspended"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: "STATUT_VENDEUR_INVALIDE"
+      });
+    }
+
+    const db = getDb();
+    const snap = await db.collection("shops")
+      .where("ownerId", "==", String(req.params.vendorId))
+      .get();
+
+    const batch = db.batch();
+
+    snap.docs.forEach(doc => {
+      batch.set(doc.ref, {
+        status,
+        active: status === "active",
+        updatedAt: timestamp()
+      }, { merge: true });
+    });
+
+    await batch.commit();
+
+    res.json({
+      success: true,
+      vendorId: String(req.params.vendorId),
+      status,
+      updated: snap.size
+    });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   BOUTIQUES
+========================= */
+
+router.get("/shops", async (req, res) => {
+  try {
+    const db = getDb();
+    const [shops, products] = await Promise.all([
+      db.collection("shops").get(),
+      db.collection("products").get()
+    ]);
+
+    const counts = {};
+    products.docs.forEach(doc => {
+      const shopId = String(doc.data().shopId || "");
+      counts[shopId] = (counts[shopId] || 0) + 1;
+    });
+
+    const result = shops.docs.map(doc => {
+      const shop = doc.data();
+
+      return normalize({
+        id: doc.id,
+        ...shop,
+        ownerName: shop.ownerName || "",
+        email: shop.email || shop.ownerEmail || "",
+        phone: shop.phone || shop.ownerPhone || "",
+        productsCount: counts[doc.id] || 0
+      });
+    });
+
+    res.json({ success: true, shops: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.patch("/shops/:shopId/status", async (req, res) => {
+  try {
+    const status =
+      req.body.status ||
+      (req.body.active === true ? "active" : "suspended");
+
+    const active =
+      req.body.active !== undefined
+        ? Boolean(req.body.active)
+        : status === "active";
+
+    await getDb().collection("shops")
+      .doc(String(req.params.shopId))
+      .set({
+        status,
+        active,
+        updatedAt: timestamp()
+      }, { merge: true });
+
+    res.json({
+      success: true,
+      result: {
+        shopId: String(req.params.shopId),
+        status,
+        active
+      }
+    });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   PRODUITS
+========================= */
+
+router.get("/products", async (req, res) => {
+  try {
+    const db = getDb();
+    const [products, shops] = await Promise.all([
+      db.collection("products").get(),
+      db.collection("shops").get()
+    ]);
+
+    const shopMap = new Map(
+      shops.docs.map(doc => [
+        doc.id,
+        doc.data().name || "—"
+      ])
+    );
+
+    const result = products.docs.map(doc => {
+      const product = doc.data();
+
+      return normalize({
+        id: doc.id,
+        ...product,
+        shopName:
+          product.shopName ||
+          shopMap.get(String(product.shopId)) ||
+          "—"
+      });
+    });
+
+    res.json({ success: true, products: result });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   COMMANDES
+========================= */
+
+router.get("/orders", async (req, res) => {
+  try {
+    const db = getDb();
+
+    let orders = await getAll("orders");
+
+    const shops = await getAll("shops");
+    const customers = await getAll("customers");
+
+    const shopMap = new Map(
+      shops.map(shop => [String(shop.id), shop.name || "—"])
+    );
+
+    const customerMap = new Map(
+      customers.map(customer => [
+        String(customer.id),
+        customer.name || "Client"
+      ])
+    );
+
+    orders = orders.map(order => ({
+      ...order,
+      shopName:
+        order.shopName ||
+        shopMap.get(String(order.shopId)) ||
+        "—",
+      customerName:
+        order.customerName ||
+        customerMap.get(String(order.customerId)) ||
+        "Client"
+    }));
+
+    orders.sort((a, b) =>
+      new Date(b.createdAt || 0).getTime() -
+      new Date(a.createdAt || 0).getTime()
+    );
+
+    const limit = Number(req.query.limit || 0);
+
+    if (limit > 0) {
+      orders = orders.slice(0, limit);
+    }
+
+    res.json({ success: true, orders });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   CONVERSATIONS
+========================= */
+
+router.get("/conversations", async (req, res) => {
+  try {
+    const db = getDb();
+
+    const conversations = await getAll("conversations");
+    const customers = await getAll("customers");
+
+    const customerMap = new Map(
+      customers.map(customer => [
+        String(customer.id),
+        customer
+      ])
+    );
+
+    const result = conversations.map(conversation => {
+      const customer = customerMap.get(
+        String(conversation.customerId)
+      );
+
+      return {
+        ...conversation,
+        customerName:
+          conversation.customerName ||
+          customer?.name ||
+          "Client",
+        customerPhone:
+          conversation.customerPhone ||
+          customer?.whatsapp ||
+          customer?.phone ||
+          ""
+      };
+    });
+
+    res.json({
+      success: true,
+      conversations: result
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/conversations/:id", async (req, res) => {
+  try {
+    const snap = await getDb()
+      .collection("conversations")
+      .doc(String(req.params.id))
+      .collection("messages")
+      .orderBy("createdAt", "asc")
+      .get();
+
+    res.json({
+      success: true,
+      messages: snap.docs.map(doc =>
+        normalize({ id: doc.id, ...doc.data() })
+      )
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   ABONNEMENTS
+========================= */
+
+router.get("/plans", async (req, res) => {
+  try {
+    const stored = await getDb()
+      .collection("settings")
+      .doc("plans")
+      .get();
+
+    const plans = stored.exists
+      ? stored.data().plans
+      : Object.values(PLANS);
+
+    res.json({ success: true, plans });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/subscriptions", async (req, res) => {
+  try {
+    const subscriptions = await getAll("subscriptions");
+    const shops = await getAll("shops");
+
+    const shopMap = new Map(
+      shops.map(shop => [
+        String(shop.id),
+        shop
+      ])
+    );
+
+    const result = subscriptions.map(subscription => {
+      const shop = shopMap.get(String(subscription.shopId));
+
+      return {
+        ...subscription,
+        shopName: subscription.shopName || shop?.name || "—",
+        sellerName:
+          subscription.sellerName ||
+          shop?.ownerName ||
+          shop?.ownerEmail ||
+          "—",
+        sellerEmail:
+          subscription.sellerEmail ||
+          shop?.ownerEmail ||
+          shop?.email ||
+          "—"
+      };
+    });
+
+    res.json({
+      success: true,
+      subscriptions: result
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put("/plans/:id", async (req, res) => {
+  try {
+    const stored = await getDb()
+      .collection("settings")
+      .doc("plans")
+      .get();
+
+    const plans = stored.exists
+      ? (stored.data().plans || [])
+      : Object.values(PLANS);
+
+    const id = String(req.params.id).toUpperCase();
+    const index = plans.findIndex(
+      plan => String(plan.name).toUpperCase() === id
+    );
+
+    const plan = {
+      ...(index >= 0 ? plans[index] : {}),
+      ...req.body,
+      name: req.body.name || (index >= 0 ? plans[index].name : id),
+      price: Number(req.body.price ?? 0)
+    };
+
+    if (index >= 0) {
+      plans[index] = plan;
+    } else {
+      plans.push(plan);
+    }
+
+    await getDb()
+      .collection("settings")
+      .doc("plans")
+      .set({
+        plans,
+        updatedAt: timestamp()
+      }, { merge: true });
+
+    res.json({ success: true, plan });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+router.delete("/plans/:id", async (req, res) => {
+  try {
+    const stored = await getDb()
+      .collection("settings")
+      .doc("plans")
+      .get();
+
+    const plans = stored.exists
+      ? (stored.data().plans || [])
+      : Object.values(PLANS);
+
+    const filtered = plans.filter(
+      plan =>
+        String(plan.name).toUpperCase() !==
+        String(req.params.id).toUpperCase()
+    );
+
+    await getDb()
+      .collection("settings")
+      .doc("plans")
+      .set({
+        plans: filtered,
+        updatedAt: timestamp()
+      }, { merge: true });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   PAIEMENTS
+========================= */
+
+router.get("/payments", async (req, res) => {
+  try {
+    const payments = await getAll("payments");
+    const shops = await getAll("shops");
+
+    const shopMap = new Map(
+      shops.map(shop => [
+        String(shop.id),
+        shop
+      ])
+    );
+
+    const result = payments.map(payment => {
+      const shop = shopMap.get(String(payment.shopId));
+
+      return {
+        ...payment,
+        sellerName:
+          payment.sellerName ||
+          shop?.ownerName ||
+          "—",
+        sellerEmail:
+          payment.sellerEmail ||
+          shop?.ownerEmail ||
+          shop?.email ||
+          "—",
+        shopName:
+          payment.shopName ||
+          shop?.name ||
+          "—"
+      };
+    });
+
+    res.json({
+      success: true,
+      payments: result
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* =========================
+   PARAMÈTRES
+========================= */
+
+router.get("/settings", async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      settings: await getSettings()
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.put("/settings/account", async (req, res) => {
+  try {
+    await getDb().collection("settings").doc("admin").set({
+      adminName: String(req.body.adminName || "").trim(),
+      adminEmail: String(req.body.adminEmail || "").trim(),
+      updatedAt: timestamp()
+    }, { merge: true });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+router.put("/settings/kendra", async (req, res) => {
+  try {
+    await getDb().collection("settings").doc("kendra").set({
+      kendraName: String(req.body.kendraName || "Kendra").trim(),
+      welcomeMessage: String(req.body.welcomeMessage || "").trim(),
+      kendraEnabled: req.body.kendraEnabled !== false,
+      updatedAt: timestamp()
+    }, { merge: true });
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+router.put("/settings/moneyfusion", async (req, res) => {
+  try {
+    /*
+     * La clé MoneyFusion reste côté serveur.
+     * Elle est appliquée au processus courant et n'est jamais renvoyée
+     * au navigateur.
+     */
+    if (req.body.apiKey !== undefined) {
+      process.env.MONEYFUSION_PRIVATE_KEY =
+        String(req.body.apiKey || "").trim();
+    }
+
+    res.json({
+      success: true,
+      moneyfusionConfigured:
+        Boolean(process.env.MONEYFUSION_PRIVATE_KEY)
+    });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+router.get("/health", async (req, res) => {
+  try {
+    const db = getDb();
+    await db.collection("_system").doc("health").get();
+
+    res.json({
+      success: true,
+      backend: true,
+      database: true,
+      moneyfusion:
+        Boolean(process.env.MONEYFUSION_API_URL) &&
+        Boolean(process.env.MONEYFUSION_PRIVATE_KEY),
+      gemini: Boolean(process.env.GEMINI_API_KEY)
+    });
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      backend: true,
+      database: false,
+      error: e.message
+    });
+  }
+});
+
+/* =========================
+   MRR
+========================= */
+
+router.get("/mrr", async (req, res) => {
+  try {
+    const subscriptions = await getAll("subscriptions");
+    const prices = Object.fromEntries(
+      Object.values(PLANS).map(plan => [
+        String(plan.name).toUpperCase(),
+        Number(plan.price || 0)
+      ])
+    );
+
+    let mrr = 0;
+    let activeSubscriptions = 0;
+
+    subscriptions.forEach(subscription => {
+      if (subscription.status === "active") {
+        activeSubscriptions++;
+        mrr += prices[
+          String(subscription.plan || "FREE").toUpperCase()
+        ] || 0;
+      }
+    });
+
+    res.json({
+      success: true,
+      activeSubscriptions,
+      mrr
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+router.post("/logout", (req, res) => {
+  res.json({ success: true });
+});
+
+module.exports = router;
