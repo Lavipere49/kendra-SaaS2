@@ -1,0 +1,48 @@
+const router = require("express").Router();
+const whatsapp = require("../services/whatsappService");
+const kendra = require("../services/kendraService");
+
+router.post("/:shopId/incoming", async (req, res) => {
+  try {
+    const { customerId, from, text } = req.body;
+
+    if (!customerId || !text) {
+      return res.status(400).json({ success:false, error:"customerId et text sont obligatoires" });
+    }
+
+    const result = await kendra.handleMessage({
+      shopId: req.params.shopId,
+      customerId,
+      text,
+      channel: "whatsapp"
+    });
+
+    const send = await whatsapp.sendMessage({
+      to: from,
+      text: result.reply
+    });
+
+    res.json({ success:true, reply:result.reply, send });
+  } catch (e) {
+    res.status(400).json({ success:false, error:e.message });
+  }
+});
+
+router.post("/:shopId/send", async (req, res) => {
+  try {
+    if (!req.body.to || !req.body.text) {
+      return res.status(400).json({ success:false, error:"to et text sont obligatoires" });
+    }
+
+    const result = await whatsapp.sendMessage({
+      to: req.body.to,
+      text: req.body.text
+    });
+
+    res.json({ success:true, result });
+  } catch(e) {
+    res.status(400).json({ success:false, error:e.message });
+  }
+});
+
+module.exports = router;
