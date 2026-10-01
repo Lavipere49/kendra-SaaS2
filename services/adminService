@@ -1,0 +1,31 @@
+const { getDb, timestamp } = require("../config/firebase");
+
+async function listShops() {
+  const snap = await getDb().collection("shops").get();
+  return snap.docs.map(d => ({ id:d.id, ...d.data() }));
+}
+
+async function setShopStatus(shopId, active) {
+  await getDb().collection("shops").doc(String(shopId)).set({
+    active: Boolean(active),
+    updatedAt: timestamp()
+  }, { merge:true });
+
+  return { shopId:String(shopId), active:Boolean(active) };
+}
+
+async function getMrr() {
+  const snap = await getDb().collection("subscriptions")
+    .where("status", "==", "active").get();
+
+  const prices = { FREE:0, STARTER:7900, BUSINESS:19900, PRO:39900 };
+  let mrr = 0;
+
+  snap.forEach(doc => {
+    mrr += prices[String(doc.data().plan || "FREE").toUpperCase()] || 0;
+  });
+
+  return { activeSubscriptions:snap.size, mrr };
+}
+
+module.exports = { listShops, setShopStatus, getMrr };
