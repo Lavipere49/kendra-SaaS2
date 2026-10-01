@@ -1,0 +1,129 @@
+const { getDb, timestamp } = require("../config/firebase");
+const subscriptionService = require("./subscriptionService");
+
+const productsRef = (shopId) =>
+  getDb().collection("products").where("shopId", "==", String(shopId));
+
+async function createProduct(shopId, data) {
+  if (!shopId) throw new Error("shopId est obligatoire");
+  if (!data.name) throw new Error("Le nom du produit est obligatoire");
+  if (data.price === undefined || Number(data.price) < 0) {
+    throw new Error("Le prix du produit est invalide");
+  }
+
+  const db = getDb();
+  const limitCheck = await subscriptionService.canUse(shopId, "products", 1);
+  if (!limitCheck.allowed) throw new Error(limitCheck.reason);
+  const ref = db.collection("products").doc();
+
+  const product = {
+    id: ref.id,
+    shopId: String(shopId),
+    name: String(data.name).trim(),
+    description: String(data.description || "").trim(),
+    price: Number(data.price),
+    stock: Math.max(0, Number(data.stock || 0)),
+    category: String(data.category || "").trim(),
+    imageUrl: String(data.imageUrl || "").trim(),
+    active: data.active !== false,
+    createdAt: timestamp(),
+    updatedAt: timestamp()
+  };
+
+  await ref.set(product);
+
+  const usageRef = db.collection("usage").doc(String(shopId));
+  await usageRef.set({
+    products: require("firebase-admin").firestore.FieldValue.increment(1),
+    updatedAt: timestamp()
+  }, { merge: true });
+
+  return product;
+}
+
+async function getProduct(shopId, productId) {
+  const snap = await getDb().collection("products").doc(productId).get();
+
+  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
+
+  return { id: snap.id, ...snap.data() };
+}
+
+async function listProducts(shopId, options = {}) {
+  const snap = await productsRef(shopId).get();
+  let products = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+  if (options.activeOnly === true) {
+    products = products.filter(product => product.active === true);
+  }
+
+  if (options.category) {
+    products = products.filter(
+      product => product.category.toLowerCase() === String(options.category).toLowerCase()
+    );
+  }
+
+  return products;
+}
+
+async function updateProduct(shopId, productId, data) {
+  const product = await getProduct(shopId, productId);
+  if (!product) return null;
+
+  const allowed = [
+    "name", "description", "price", "stock",
+    "category", "imageUrl", "active"
+  ];
+
+  const update = {};
+  for (const key of allowed) {
+    if (data[key] !== undefined) update[key] = data[key];
+  }
+
+  if (update.price !== undefined) {
+    update.price = Number(update.price);
+    if (update.price < 0) throw new Error("Le prix est invalide");
+  }
+
+  if (update.stock !== undefined) {
+    update.stock = Math.max(0, Number(update.stock));
+  }
+
+  if (update.name !== undefined) {
+    update.name = String(update.name).trim();
+  }
+
+  update.updatedAt = timestamp();
+
+  await getDb().collection("products").doc(productId).update(update);
+
+  return getProduct(shopId, productId);
+}
+
+async function deleteProduct(shopId, productId) {
+  const product = await getProduct(shopId, productId);
+  if (!product) return false;
+
+  await getDb().collection("products").doc(productId).delete();
+
+  const admin = require("firebase-admin");
+  await getDb().collection("usage").doc(String(shopId)).set({
+    products: admin.firestore.FieldValue.increment(-1),
+    updatedAt: timestamp()
+  }, { merge: true });
+
+  return true;
+}
+
+async function updateStock(shopId, productId, stock) {
+  return updateProduct(shopId, productId, { stock });
+}
+
+module.exports = {
+  createProduct,
+  getProduct,
+  listProducts,
+  updateProduct,
+  deleteProduct,
+  updateStock
+};
