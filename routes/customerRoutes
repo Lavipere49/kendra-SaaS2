@@ -1,0 +1,63 @@
+const router = require("express").Router();
+const service = require("../services/customerService");
+
+router.post("/:shopId", async (req,res) => {
+  try {
+    res.status(201).json({
+      success:true,
+      customer:await service.createCustomer(req.params.shopId, req.body)
+    });
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId", async (req,res) => {
+  try {
+    res.json({
+      success:true,
+      customers:await service.listCustomers(req.params.shopId)
+    });
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId/whatsapp/:whatsapp", async (req,res) => {
+  try {
+    const customer = await service.findByWhatsApp(
+      req.params.shopId,
+      req.params.whatsapp
+    );
+    if (!customer) return res.status(404).json({success:false,error:"Client introuvable"});
+    res.json({success:true,customer});
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId/:customerId", async (req,res) => {
+  try {
+    const customer = await service.getCustomer(req.params.shopId, req.params.customerId);
+    if (!customer) return res.status(404).json({success:false,error:"Client introuvable"});
+    res.json({success:true,customer});
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.patch("/:shopId/:customerId", async (req,res) => {
+  try {
+    const customer = await service.updateCustomer(
+      req.params.shopId,
+      req.params.customerId,
+      req.body
+    );
+    if (!customer) return res.status(404).json({success:false,error:"Client introuvable"});
+    res.json({success:true,customer});
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+module.exports = router;
