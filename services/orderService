@@ -1,0 +1,124 @@
+const { getDb, timestamp } = require("../config/firebase");
+const subscriptionService = require("./subscriptionService");
+
+async function createOrder(shopId, data) {
+  if (!shopId) throw new Error("shopId est obligatoire");
+  await subscriptionService.assertActive(shopId);
+  const orderLimit = await subscriptionService.canUse(shopId, "orders", 1);
+  if (!orderLimit.allowed) throw new Error(orderLimit.reason);
+  if (!data.customerId) throw new Error("customerId est obligatoire");
+  if (!Array.isArray(data.items) || data.items.length === 0) {
+    throw new Error("La commande doit contenir au moins un produit");
+  }
+
+  const db = getDb();
+  const customerRef = db.collection("customers").doc(data.customerId);
+  const customerSnap = await customerRef.get();
+
+  if (!customerSnap.exists || customerSnap.data().shopId !== String(shopId)) {
+    throw new Error("Client invalide pour cette boutique");
+  }
+
+  let total = 0;
+  const items = [];
+
+  for (const item of data.items) {
+    if (!item.productId || Number(item.quantity) <= 0) {
+      throw new Error("Article de commande invalide");
+    }
+
+    const productSnap = await db.collection("products").doc(item.productId).get();
+
+    if (!productSnap.exists || productSnap.data().shopId !== String(shopId)) {
+      throw new Error("Produit invalide pour cette boutique");
+    }
+
+    const product = productSnap.data();
+    const quantity = Number(item.quantity);
+
+    if (Number(product.stock) < quantity) {
+      throw new Error(`Stock insuffisant pour ${product.name}`);
+    }
+
+    const unitPrice = Number(product.price);
+    total += unitPrice * quantity;
+
+    items.push({
+      productId: productSnap.id,
+      name: product.name,
+      quantity,
+      unitPrice,
+      subtotal: unitPrice * quantity
+    });
+  }
+
+  const orderRef = db.collection("orders").doc();
+
+  const order = {
+    id: orderRef.id,
+    shopId: String(shopId),
+    customerId: String(data.customerId),
+    items,
+    total,
+    status: data.status || "pending",
+    paymentStatus: data.paymentStatus || "unpaid",
+    source: data.source || "kendra",
+    createdAt: timestamp(),
+    updatedAt: timestamp()
+  };
+
+  const batch = db.batch();
+  batch.set(orderRef, order);
+
+  for (const item of items) {
+    const productRef = db.collection("products").doc(item.productId);
+    batch.update(productRef, {
+      stock: require("firebase-admin").firestore.FieldValue.increment(-item.quantity),
+      updatedAt: timestamp()
+    });
+  }
+
+  batch.update(customerRef, {
+    totalOrders: require("firebase-admin").firestore.FieldValue.increment(1),
+    totalSpent: require("firebase-admin").firestore.FieldValue.increment(total),
+    lastContactAt: timestamp(),
+    updatedAt: timestamp()
+  });
+
+  batch.set(db.collection("usage").doc(String(shopId)), {
+    orders: require("firebase-admin").firestore.FieldValue.increment(1),
+    updatedAt: timestamp()
+  }, { merge: true });
+
+  await batch.commit();
+  return order;
+}
+
+async function getOrder(shopId, orderId) {
+  const snap = await getDb().collection("orders").doc(orderId).get();
+  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
+  return { id: snap.id, ...snap.data() };
+}
+
+async function listOrders(shopId) {
+  const snap = await getDb().collection("orders")
+    .where("shopId", "==", String(shopId)).get();
+  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+}
+
+async function updateOrder(shopId, orderId, data) {
+  const order = await getOrder(shopId, orderId);
+  if (!order) return null;
+
+  const allowed = ["status", "paymentStatus"];
+  const update = {};
+  for (const key of allowed) {
+    if (data[key] !== undefined) update[key] = data[key];
+  }
+  update.updatedAt = timestamp();
+
+  await getDb().collection("orders").doc(orderId).update(update);
+  return getOrder(shopId, orderId);
+}
+
+module.exports = { createOrder, getOrder, listOrders, updateOrder };
