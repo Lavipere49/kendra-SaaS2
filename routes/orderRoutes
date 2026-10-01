@@ -1,0 +1,47 @@
+const router = require("express").Router();
+const service = require("../services/orderService");
+
+router.post("/:shopId", async (req,res) => {
+  try {
+    res.status(201).json({
+      success:true,
+      order:await service.createOrder(req.params.shopId, req.body)
+    });
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId", async (req,res) => {
+  try {
+    res.json({success:true,orders:await service.listOrders(req.params.shopId)});
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId/:orderId", async (req,res) => {
+  try {
+    const order = await service.getOrder(req.params.shopId, req.params.orderId);
+    if (!order) return res.status(404).json({success:false,error:"Commande introuvable"});
+    res.json({success:true,order});
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.patch("/:shopId/:orderId", async (req,res) => {
+  try {
+    const order = await service.updateOrder(
+      req.params.shopId,
+      req.params.orderId,
+      req.body
+    );
+    if (!order) return res.status(404).json({success:false,error:"Commande introuvable"});
+    res.json({success:true,order});
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+module.exports = router;
