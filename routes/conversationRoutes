@@ -1,0 +1,82 @@
+const router = require("express").Router();
+const service = require("../services/conversationService");
+
+router.get("/:shopId", async (req,res) => {
+  try {
+    res.json({ success:true, conversations:await service.listConversations(req.params.shopId) });
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.post("/:shopId/open", async (req,res) => {
+  try {
+    res.status(201).json({
+      success:true,
+      conversation:await service.getOrCreateConversation(
+        req.params.shopId,
+        req.body.customerId,
+        req.body.channel || "whatsapp"
+      )
+    });
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+router.post("/:shopId/:conversationId/messages", async (req,res) => {
+  try {
+    res.status(201).json({
+      success:true,
+      message:await service.addMessage(
+        req.params.shopId,
+        req.params.conversationId,
+        req.body
+      )
+    });
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+router.get("/:shopId/:conversationId/messages", async (req,res) => {
+  try {
+    const messages = await service.getMessages(
+      req.params.shopId,
+      req.params.conversationId
+    );
+    if (!messages) return res.status(404).json({success:false,error:"Conversation introuvable"});
+    res.json({success:true,messages});
+  } catch(e) {
+    res.status(500).json({success:false,error:e.message});
+  }
+});
+
+router.patch("/:shopId/:conversationId/context", async (req,res) => {
+  try {
+    const conversation = await service.updateContext(
+      req.params.shopId,
+      req.params.conversationId,
+      req.body.context
+    );
+    if (!conversation) return res.status(404).json({success:false,error:"Conversation introuvable"});
+    res.json({success:true,conversation});
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+router.patch("/:shopId/:conversationId/close", async (req,res) => {
+  try {
+    const conversation = await service.closeConversation(
+      req.params.shopId,
+      req.params.conversationId
+    );
+    if (!conversation) return res.status(404).json({success:false,error:"Conversation introuvable"});
+    res.json({success:true,conversation});
+  } catch(e) {
+    res.status(400).json({success:false,error:e.message});
+  }
+});
+
+module.exports = router;
