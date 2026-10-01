@@ -1,0 +1,32 @@
+const { getDb, timestamp } = require("../config/firebase");
+
+async function initializeShopSaaS(shopId, ownerId, plan = "FREE") {
+  const db = getDb();
+  const batch = db.batch();
+
+  batch.set(db.collection("subscriptions").doc(shopId), {
+    shopId, ownerId, plan, status: "active",
+    startedAt: timestamp(), expiresAt: null,
+    createdAt: timestamp(), updatedAt: timestamp()
+  });
+
+  batch.set(db.collection("usage").doc(shopId), {
+    shopId, messages: 0, orders: 0, products: 0, customers: 0,
+    updatedAt: timestamp()
+  });
+
+  await batch.commit();
+  return { subscriptionId: shopId, usageId: shopId };
+}
+
+async function getSubscription(shopId) {
+  const snap = await getDb().collection("subscriptions").doc(shopId).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
+async function getUsage(shopId) {
+  const snap = await getDb().collection("usage").doc(shopId).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
+module.exports = { initializeShopSaaS, getSubscription, getUsage };
