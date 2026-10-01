@@ -1,0 +1,32 @@
+const router = require("express").Router();
+const service = require("../services/cartService");
+
+router.get("/:shopId/:customerId", async (req,res)=>{
+  try { res.json({success:true,cart:await service.getCart(req.params.shopId,req.params.customerId)}); }
+  catch(e){ res.status(500).json({success:false,error:e.message}); }
+});
+
+router.post("/:shopId/:customerId/items", async (req,res)=>{
+  try {
+    const cart=await service.addItem(
+      req.params.shopId, req.params.customerId,
+      req.body.productId, req.body.quantity
+    );
+    res.json({success:true,cart});
+  } catch(e){ res.status(400).json({success:false,error:e.message}); }
+});
+
+router.delete("/:shopId/:customerId/items/:productId", async (req,res)=>{
+  try {
+    res.json({success:true,cart:await service.removeItem(
+      req.params.shopId,req.params.customerId,req.params.productId
+    )});
+  } catch(e){ res.status(400).json({success:false,error:e.message}); }
+});
+
+router.delete("/:shopId/:customerId", async (req,res)=>{
+  try { res.json({success:true,cart:await service.clearCart(req.params.shopId,req.params.customerId)}); }
+  catch(e){ res.status(500).json({success:false,error:e.message}); }
+});
+
+module.exports = router;
