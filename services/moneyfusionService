@@ -1,0 +1,86 @@
+const { moneyFusionConfig } = require("../config/moneyfusion");
+
+async function requestPayment({
+  totalPrice,
+  article,
+  numeroSend,
+  nomclient,
+  userId,
+  orderId,
+  returnUrl,
+  webhookUrl
+}) {
+  const config = moneyFusionConfig();
+
+  const payload = {
+    totalPrice: Number(totalPrice),
+    article: Array.isArray(article) ? article : [],
+    personal_Info: [{
+      userId: String(userId || ""),
+      orderId: String(orderId || "")
+    }],
+    numeroSend: String(numeroSend || "").trim(),
+    nomclient: String(nomclient || "Kendra").trim()
+  };
+
+  if (!payload.totalPrice || payload.totalPrice <= 0) {
+    throw new Error("MONEYFUSION_AMOUNT_INVALID");
+  }
+
+  if (!payload.numeroSend) {
+    throw new Error("MONEYFUSION_PHONE_MISSING");
+  }
+
+  if (returnUrl) payload.return_url = returnUrl;
+  if (webhookUrl) payload.webhook_url = webhookUrl;
+
+  const headers = { "Content-Type": "application/json" };
+  if (config.privateKey) {
+    headers["moneyfusion-private-key"] = config.privateKey;
+  }
+
+  const response = await fetch(config.paymentUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || data.statut === false) {
+    throw new Error(
+      data.message || `MONEYFUSION_PAYMENT_FAILED_${response.status}`
+    );
+  }
+
+  if (!data.url || !data.token) {
+    throw new Error("MONEYFUSION_PAYMENT_RESPONSE_INVALID");
+  }
+
+  return data;
+}
+
+async function checkPayment(token) {
+  if (!token) throw new Error("MONEYFUSION_TOKEN_MISSING");
+
+  const { statusBaseUrl, privateKey } = moneyFusionConfig();
+  const headers = {};
+  if (privateKey) headers["moneyfusion-private-key"] = privateKey;
+
+  const response = await fetch(
+    `${statusBaseUrl}/${encodeURIComponent(token)}`,
+    { headers }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || data.statut === false) {
+    throw new Error(
+      data.message || `MONEYFUSION_STATUS_FAILED_${response.status}`
+    );
+  }
+
+  return data;
+}
+
+module.exports = { requestPayment, checkPayment };
