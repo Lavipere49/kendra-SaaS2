@@ -1,0 +1,12 @@
+const router = require("express").Router();
+const service = require("../services/analyticsService");
+
+router.get("/:shopId/dashboard", async (req, res) => {
+  try {
+    res.json({ success: true, dashboard: await service.getDashboard(req.params.shopId) });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+module.exports = router;
