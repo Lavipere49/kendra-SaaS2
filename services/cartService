@@ -1,0 +1,78 @@
+const { getDb, timestamp } = require("../config/firebase");
+
+function cartRef(shopId, customerId) {
+  return getDb().collection("carts").doc(`${shopId}_${customerId}`);
+}
+
+async function getCart(shopId, customerId) {
+  const snap = await cartRef(shopId, customerId).get();
+  return snap.exists
+    ? { id: snap.id, ...snap.data() }
+    : { id: `${shopId}_${customerId}`, shopId: String(shopId), customerId: String(customerId), items: [], total: 0 };
+}
+
+async function addItem(shopId, customerId, productId, quantity) {
+  const qty = Number(quantity);
+  if (!Number.isInteger(qty) || qty <= 0) throw new Error("Quantité invalide");
+
+  const productSnap = await getDb().collection("products").doc(productId).get();
+  if (!productSnap.exists || productSnap.data().shopId !== String(shopId)) {
+    throw new Error("Produit introuvable dans cette boutique");
+  }
+
+  const product = productSnap.data();
+  if (!product.active) throw new Error("Produit indisponible");
+
+  const cart = await getCart(shopId, customerId);
+  const items = [...cart.items];
+  const existing = items.find(i => i.productId === productId);
+  const newQty = (existing?.quantity || 0) + qty;
+
+  if (newQty > Number(product.stock)) throw new Error("Stock insuffisant");
+
+  if (existing) {
+    existing.quantity = newQty;
+    existing.subtotal = newQty * Number(product.price);
+  } else {
+    items.push({
+      productId,
+      name: product.name,
+      unitPrice: Number(product.price),
+      quantity: qty,
+      subtotal: qty * Number(product.price)
+    });
+  }
+
+  const total = items.reduce((s, i) => s + Number(i.subtotal), 0);
+  await cartRef(shopId, customerId).set({
+    shopId: String(shopId),
+    customerId: String(customerId),
+    items,
+    total,
+    updatedAt: timestamp()
+  });
+
+  return getCart(shopId, customerId);
+}
+
+async function removeItem(shopId, customerId, productId) {
+  const cart = await getCart(shopId, customerId);
+  const items = cart.items.filter(i => i.productId !== productId);
+  const total = items.reduce((s, i) => s + Number(i.subtotal), 0);
+
+  await cartRef(shopId, customerId).set({
+    ...cart, items, total, updatedAt: timestamp()
+  });
+
+  return getCart(shopId, customerId);
+}
+
+async function clearCart(shopId, customerId) {
+  await cartRef(shopId, customerId).set({
+    shopId: String(shopId), customerId: String(customerId),
+    items: [], total: 0, updatedAt: timestamp()
+  });
+  return getCart(shopId, customerId);
+}
+
+module.exports = { getCart, addItem, removeItem, clearCart };
