@@ -1,0 +1,25 @@
+const provider = process.env.WHATSAPP_PROVIDER || "whapi";
+
+async function sendMessage({ to, text }) {
+  if (provider === "whapi") {
+    if (!process.env.WHAPI_API_TOKEN || !process.env.WHAPI_API_URL) {
+      throw new Error("WHAPI_CONFIG_MISSING");
+    }
+
+    const response = await fetch(`${process.env.WHAPI_API_URL}/messages/text`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.WHAPI_API_TOKEN}`
+      },
+      body: JSON.stringify({ to, body: text })
+    });
+
+    if (!response.ok) throw new Error(`WHAPI_SEND_FAILED_${response.status}`);
+    return response.json();
+  }
+
+  throw new Error(`WHATSAPP_PROVIDER_NOT_SUPPORTED_${provider}`);
+}
+
+module.exports = { sendMessage };
