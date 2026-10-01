@@ -1,0 +1,42 @@
+const { getDb, timestamp } = require("../config/firebase");
+const { initializeShopSaaS } = require("./saasService");
+
+const shopsRef = () => getDb().collection("shops");
+
+async function createShop({ ownerId, name, phone = "", plan = "FREE" }) {
+  if (!ownerId || !name) throw new Error("ownerId et name sont obligatoires");
+
+  const ref = shopsRef().doc();
+  const shop = {
+    id: ref.id, ownerId: String(ownerId), name: String(name).trim(),
+    phone: String(phone).trim(), plan, status: "active",
+    createdAt: timestamp(), updatedAt: timestamp()
+  };
+
+  await ref.set(shop);
+  await initializeShopSaaS(ref.id, String(ownerId), plan);
+  return shop;
+}
+
+async function getShop(shopId) {
+  const snap = await shopsRef().doc(shopId).get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
+async function updateShop(shopId, data) {
+  const clean = { ...data };
+  delete clean.id; delete clean.ownerId;
+  clean.updatedAt = timestamp();
+  await shopsRef().doc(shopId).set(clean, { merge: true });
+  return getShop(shopId);
+}
+
+async function getShopsByOwner(ownerId) {
+  const snap = await shopsRef().where("ownerId", "==", String(ownerId)).get();
+  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+}
+
+
+async function resolveCurrentShop(){const configured=String(process.env.KENDRA_SHOP_ID||"").trim();if(configured){const s=await getShop(configured);if(!s)throw new Error("KENDRA_SHOP_CONFIGURED_SHOP_NOT_FOUND");return s}const snap=await shopsRef().where("status","==","active").limit(2).get();if(snap.size===1){const d=snap.docs[0];return{id:d.id,...d.data()}}if(snap.size===0)throw new Error("KENDRA_NO_ACTIVE_SHOP");throw new Error("KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS")}
+
+module.exports = { createShop, getShop, updateShop, getShopsByOwner, resolveCurrentShop };
