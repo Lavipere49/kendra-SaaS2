@@ -1,0 +1,107 @@
+const router = require("express").Router();
+const service = require("../services/productService");
+
+router.post("/:shopId", async (req, res) => {
+  try {
+    const product = await service.createProduct(req.params.shopId, req.body);
+    res.status(201).json({ success: true, product });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+router.get("/:shopId", async (req, res) => {
+  try {
+    const products = await service.listProducts(req.params.shopId, {
+      activeOnly: req.query.activeOnly === "true",
+      category: req.query.category
+    });
+    res.json({ success: true, products });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.get("/:shopId/:productId", async (req, res) => {
+  try {
+    const product = await service.getProduct(
+      req.params.shopId,
+      req.params.productId
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: "Produit introuvable"
+      });
+    }
+
+    res.json({ success: true, product });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.patch("/:shopId/:productId", async (req, res) => {
+  try {
+    const product = await service.updateProduct(
+      req.params.shopId,
+      req.params.productId,
+      req.body
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: "Produit introuvable"
+      });
+    }
+
+    res.json({ success: true, product });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+router.patch("/:shopId/:productId/stock", async (req, res) => {
+  try {
+    const product = await service.updateStock(
+      req.params.shopId,
+      req.params.productId,
+      req.body.stock
+    );
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: "Produit introuvable"
+      });
+    }
+
+    res.json({ success: true, product });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+router.delete("/:shopId/:productId", async (req, res) => {
+  try {
+    const deleted = await service.deleteProduct(
+      req.params.shopId,
+      req.params.productId
+    );
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        error: "Produit introuvable"
+      });
+    }
+
+    res.json({ success: true, message: "Produit supprimé" });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+module.exports = router;
