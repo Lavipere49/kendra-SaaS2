@@ -1,0 +1,43 @@
+const { getDb } = require("../config/firebase");
+
+function timeOf(value) {
+  if (!value) return 0;
+  if (value.toDate) return value.toDate().getTime();
+  if (value._seconds) return value._seconds * 1000;
+  if (value.seconds) return value.seconds * 1000;
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+async function getDashboard(shopId) {
+  const db = getDb();
+  const [usageSnap, productsSnap, customersSnap, ordersSnap, conversationsSnap] = await Promise.all([
+    db.collection("usage").doc(String(shopId)).get(),
+    db.collection("products").where("shopId", "==", String(shopId)).get(),
+    db.collection("customers").where("shopId", "==", String(shopId)).get(),
+    db.collection("orders").where("shopId", "==", String(shopId)).get(),
+    db.collection("conversations").where("shopId", "==", String(shopId)).get()
+  ]);
+
+  const orders = ordersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const revenue = orders
+    .filter(o => o.paymentStatus === "paid" || o.status === "completed")
+    .reduce((sum, o) => sum + Number(o.total || 0), 0);
+
+  const recentOrders = [...orders]
+    .sort((a,b) => timeOf(b.createdAt) - timeOf(a.createdAt))
+    .slice(0, 8);
+
+  return {
+    shopId: String(shopId),
+    usage: usageSnap.exists ? usageSnap.data() : {},
+    products: productsSnap.size,
+    customers: customersSnap.size,
+    orders: ordersSnap.size,
+    conversations: conversationsSnap.size,
+    revenue,
+    recentOrders
+  };
+}
+
+module.exports = { getDashboard };
