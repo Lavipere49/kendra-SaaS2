@@ -1,0 +1,148 @@
+const { getDb, timestamp } = require("../config/firebase");
+
+async function getOrCreateConversation(shopId, customerId, channel = "whatsapp") {
+  const db = getDb();
+  const existing = await db.collection("conversations")
+    .where("shopId", "==", String(shopId))
+    .where("customerId", "==", String(customerId))
+    .where("channel", "==", channel)
+    .where("status", "==", "open")
+    .limit(1)
+    .get();
+
+  if (!existing.empty) {
+    const doc = existing.docs[0];
+    return { id: doc.id, ...doc.data() };
+  }
+
+  const ref = db.collection("conversations").doc();
+  const conversation = {
+    id: ref.id,
+    shopId: String(shopId),
+    customerId: String(customerId),
+    channel,
+    status: "open",
+    context: {},
+    messageCount: 0,
+    lastMessageAt: timestamp(),
+    createdAt: timestamp(),
+    updatedAt: timestamp()
+  };
+
+  await ref.set(conversation);
+  return conversation;
+}
+
+async function addMessage(shopId, conversationId, message) {
+  const db = getDb();
+  const ref = db.collection("conversations").doc(conversationId);
+  const snap = await ref.get();
+
+  if (!snap.exists || snap.data().shopId !== String(shopId)) {
+    throw new Error("Conversation invalide pour cette boutique");
+  }
+
+  const messageRef = ref.collection("messages").doc();
+
+  const messageData = {
+    id: messageRef.id,
+    role: message.role || "user",
+    text: String(message.text || ""),
+    source: message.source || "whatsapp",
+    createdAt: timestamp()
+  };
+
+  const batch = db.batch();
+  batch.set(messageRef, messageData);
+  batch.update(ref, {
+    messageCount: require("firebase-admin").firestore.FieldValue.increment(1),
+    lastMessageAt: timestamp(),
+    updatedAt: timestamp()
+  });
+
+  await batch.commit();
+  return messageData;
+}
+
+async function getMessages(shopId, conversationId) {
+  const conversation = await dbConversation(shopId, conversationId);
+  if (!conversation) return null;
+
+  const snap = await getDb().collection("conversations")
+    .doc(conversationId)
+    .collection("messages")
+    .orderBy("createdAt", "asc")
+    .get();
+
+  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+}
+
+async function updateContext(shopId, conversationId, context) {
+  const conversation = await dbConversation(shopId, conversationId);
+  if (!conversation) return null;
+
+  await getDb().collection("conversations").doc(conversationId).set({
+    context: context || {},
+    updatedAt: timestamp()
+  }, { merge: true });
+
+  const snap = await getDb().collection("conversations").doc(conversationId).get();
+  return { id: snap.id, ...snap.data() };
+}
+
+async function closeConversation(shopId, conversationId) {
+  const conversation = await dbConversation(shopId, conversationId);
+  if (!conversation) return null;
+
+  await getDb().collection("conversations").doc(conversationId).update({
+    status: "closed",
+    updatedAt: timestamp()
+  });
+
+  const snap = await getDb().collection("conversations").doc(conversationId).get();
+  return { id: snap.id, ...snap.data() };
+}
+
+async function dbConversation(shopId, conversationId) {
+  const snap = await getDb().collection("conversations").doc(conversationId).get();
+  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
+  return { id: snap.id, ...snap.data() };
+}
+
+async function listConversations(shopId) {
+  const snap = await getDb().collection("conversations")
+    .where("shopId", "==", String(shopId))
+    .get();
+
+  const conversations = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  conversations.sort((a, b) => {
+    const ad = a.lastMessageAt?.toDate ? a.lastMessageAt.toDate().getTime() : new Date(a.lastMessageAt || 0).getTime();
+    const bd = b.lastMessageAt?.toDate ? b.lastMessageAt.toDate().getTime() : new Date(b.lastMessageAt || 0).getTime();
+    return bd - ad;
+  });
+
+  const customerIds = [...new Set(conversations.map(c => c.customerId).filter(Boolean))];
+  const customers = await Promise.all(customerIds.map(id => getDb().collection("customers").doc(id).get()));
+  const customerMap = new Map(
+    customers.filter(s => s.exists).map(s => [s.id, { id: s.id, ...s.data() }])
+  );
+
+  return conversations.map(c => {
+    const customer = customerMap.get(c.customerId) || {};
+    return {
+      ...c,
+      customerName: customer.name || "Client",
+      customerPhone: customer.whatsapp || customer.phone || "",
+      customer: customer.id ? customer : null
+    };
+  });
+}
+
+module.exports = {
+  getOrCreateConversation,
+  listConversations,
+  addMessage,
+  getMessages,
+  updateContext,
+  closeConversation
+};
