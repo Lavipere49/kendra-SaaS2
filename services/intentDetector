@@ -1,0 +1,27 @@
+function detectIntent(message) {
+  const text = String(message || "").toLowerCase();
+
+  if (/^(bonjour|salut|cc|coucou|hello|bonsoir|bjr)\b/.test(text)) {
+    return "SALUTATION";
+  }
+
+  if (/(ajoute|ajouter|mets|mettre).*(panier)|panier/.test(text)) {
+    return "AJOUT_PANIER";
+  }
+
+  if (/(commande|commander|acheter|achète|achat)/.test(text)) {
+    return "ACHAT";
+  }
+
+  if (/(recommande|recommande-moi|conseille|meilleur|suggere|suggère)/.test(text)) {
+    return "RECOMMANDATION";
+  }
+
+  if (/(combien|prix|coût|cout|disponible|dispo|avez|cherche|recherche)/.test(text)) {
+    return "RECHERCHE_PRODUIT";
+  }
+
+  return "AUTRE";
+}
+
+module.exports = detectIntent;
