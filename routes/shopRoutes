@@ -1,0 +1,38 @@
+const router = require("express").Router();
+const service = require("../services/shopService");
+
+router.get("/current", async (req, res) => {
+  try {
+    const shop = await service.resolveCurrentShop();
+    res.json({ success: true, shop });
+  } catch (e) {
+    res
+      .status(e.message === "KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS" ? 409 : 404)
+      .json({ success: false, error: e.message });
+  }
+});
+
+router.post("/", async (req,res)=>{
+  try { res.status(201).json({success:true, shop:await service.createShop(req.body)}); }
+  catch(e){ res.status(400).json({success:false,error:e.message}); }
+});
+
+router.get("/owner/:ownerId", async (req,res)=>{
+  try { res.json({success:true,shops:await service.getShopsByOwner(req.params.ownerId)}); }
+  catch(e){ res.status(500).json({success:false,error:e.message}); }
+});
+
+router.get("/:shopId", async (req,res)=>{
+  try {
+    const shop=await service.getShop(req.params.shopId);
+    if(!shop) return res.status(404).json({success:false,error:"Boutique introuvable"});
+    res.json({success:true,shop});
+  } catch(e){res.status(500).json({success:false,error:e.message});}
+});
+
+router.patch("/:shopId", async (req,res)=>{
+  try {res.json({success:true,shop:await service.updateShop(req.params.shopId,req.body)});}
+  catch(e){res.status(400).json({success:false,error:e.message});}
+});
+
+module.exports = router;
