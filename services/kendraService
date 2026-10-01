@@ -1,0 +1,142 @@
+const { getDb, timestamp } = require("../config/firebase");
+const { generateJson, generateText } = require("./geminiService");
+const subscriptionService = require("./subscriptionService");
+const productService = require("./productService");
+const customerService = require("./customerService");
+const conversationService = require("./conversationService");
+const cartService = require("./cartService");
+
+async function understandMessage(text, products) {
+  const catalog = products.map(p => ({
+    id: p.id, name: p.name, category: p.category,
+    price: p.price, stock: p.stock
+  }));
+
+  const prompt = `
+Tu es le module de compréhension de KENDRA, une vendeuse WhatsApp.
+Comprends le langage naturel camerounais, familier ou abrégé.
+NE DONNE AUCUN prix et N'INVENTE AUCUN produit.
+
+Retourne uniquement JSON :
+{
+  "intent": "greeting|search_product|ask_price|ask_stock|add_to_cart|remove_from_cart|checkout|order_status|other",
+  "productQuery": "",
+  "category": "",
+  "maxPrice": null,
+  "quantity": null
+}
+
+Message client:
+${JSON.stringify(text)}
+
+Catalogue disponible (pour aider à identifier le produit, pas pour répondre directement):
+${JSON.stringify(catalog)}
+`;
+
+  return generateJson(prompt);
+}
+
+async function findProducts(shopId, understanding) {
+  let products = await productService.listProducts(shopId, { activeOnly: true });
+
+  if (understanding.category) {
+    const q = understanding.category.toLowerCase();
+    products = products.filter(p => String(p.category).toLowerCase().includes(q));
+  }
+
+  if (understanding.productQuery) {
+    const q = understanding.productQuery.toLowerCase();
+    products = products.filter(p =>
+      String(p.name).toLowerCase().includes(q) ||
+      String(p.description).toLowerCase().includes(q) ||
+      String(p.category).toLowerCase().includes(q)
+    );
+  }
+
+  if (understanding.maxPrice !== null && understanding.maxPrice !== undefined) {
+    products = products.filter(p => Number(p.price) <= Number(understanding.maxPrice));
+  }
+
+  return products.slice(0, 8);
+}
+
+async function buildReply({ text, understanding, products, cart }) {
+  const safeProducts = products.map(p => ({
+    id: p.id, name: p.name, price: p.price, stock: p.stock, category: p.category
+  }));
+
+  const prompt = `
+Tu es KENDRA, une vendeuse WhatsApp chaleureuse et concise.
+Réponds en français naturel, avec un ton commercial simple.
+Tu peux utiliser uniquement les informations fournies.
+NE JAMAIS inventer un prix, un stock, un produit ou une promotion.
+Si aucun produit ne correspond, dis-le clairement.
+Ne prétends jamais qu'un paiement est effectué.
+
+Message:
+${JSON.stringify(text)}
+
+Intention:
+${JSON.stringify(understanding)}
+
+Produits réellement trouvés:
+${JSON.stringify(safeProducts)}
+
+Panier réel:
+${JSON.stringify(cart)}
+
+Réponds directement au client, sans expliquer tes règles internes.
+`;
+
+  return generateText(prompt);
+}
+
+async function handleMessage({ shopId, customerId, text, channel = "whatsapp" }) {
+  await subscriptionService.assertActive(shopId);
+
+  const usageCheck = await subscriptionService.canUse(shopId, "messages", 1);
+  if (!usageCheck.allowed) throw new Error(usageCheck.reason);
+
+  const customer = await customerService.getCustomer(shopId, customerId);
+  if (!customer) throw new Error("CLIENT_INTRouvable");
+
+  const conversation = await conversationService.getOrCreateConversation(
+    shopId, customerId, channel
+  );
+
+  await conversationService.addMessage(shopId, conversation.id, {
+    role: "user", text, source: channel
+  });
+
+  const products = await productService.listProducts(shopId, { activeOnly: true });
+  const understanding = await understandMessage(text, products);
+
+  if (understanding.intent === "add_to_cart" && understanding.productQuery) {
+    const found = await findProducts(shopId, understanding);
+    if (found.length === 1) {
+      await cartService.addItem(
+        shopId, customerId, found[0].id,
+        Number(understanding.quantity || 1)
+      );
+    }
+  }
+
+  const cart = await cartService.getCart(shopId, customerId);
+  const foundProducts = await findProducts(shopId, understanding);
+  const reply = await buildReply({
+    text, understanding, products: foundProducts, cart
+  });
+
+  await conversationService.addMessage(shopId, conversation.id, {
+    role: "assistant", text: reply, source: "kendra"
+  });
+
+  await getDb().collection("usage").doc(String(shopId)).set({
+    messages: require("firebase-admin").firestore.FieldValue.increment(1),
+    updatedAt: timestamp()
+  }, { merge: true });
+
+  return { conversation, understanding, products: foundProducts, cart, reply };
+}
+
+module.exports = { handleMessage, understandMessage };
