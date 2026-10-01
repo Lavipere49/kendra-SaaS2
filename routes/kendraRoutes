@@ -1,0 +1,29 @@
+const router = require("express").Router();
+const service = require("../services/kendraService");
+
+router.post("/:shopId/:customerId/message", async (req,res)=>{
+  try {
+    if (!req.body.text) {
+      return res.status(400).json({success:false,error:"text est obligatoire"});
+    }
+
+    const result = await service.handleMessage({
+      shopId:req.params.shopId,
+      customerId:req.params.customerId,
+      text:req.body.text,
+      channel:req.body.channel || "whatsapp"
+    });
+
+    res.json({success:true,...result});
+  } catch(e) {
+    const status = [
+      "ABONNEMENT_INACTIF",
+      "LIMITE_MESSAGES",
+      "GEMINI_API_KEY_MISSING"
+    ].includes(e.message) ? 403 : 400;
+
+    res.status(status).json({success:false,error:e.message});
+  }
+});
+
+module.exports = router;
