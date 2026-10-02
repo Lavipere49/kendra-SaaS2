@@ -1,25 +1,75 @@
-const provider = process.env.WHATSAPP_PROVIDER || "whapi";
+const { getWhatsAppConfig } = require("./shopService");
 
-async function sendMessage({ to, text }) {
-  if (provider === "whapi") {
-    if (!process.env.WHAPI_API_TOKEN || !process.env.WHAPI_API_URL) {
-      throw new Error("WHAPI_CONFIG_MISSING");
-    }
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 
-    const response = await fetch(`${process.env.WHAPI_API_URL}/messages/text`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.WHAPI_API_TOKEN}`
-      },
-      body: JSON.stringify({ to, body: text })
-    });
-
-    if (!response.ok) throw new Error(`WHAPI_SEND_FAILED_${response.status}`);
-    return response.json();
+async function sendMessage({ shopId, to, text }) {
+  if (!shopId) {
+    throw new Error("SHOP_ID_REQUIRED");
   }
 
-  throw new Error(`WHATSAPP_PROVIDER_NOT_SUPPORTED_${provider}`);
+  if (!to) {
+    throw new Error("WHATSAPP_RECIPIENT_REQUIRED");
+  }
+
+  if (!text) {
+    throw new Error("WHATSAPP_MESSAGE_REQUIRED");
+  }
+
+  const config = await getWhatsAppConfig(shopId);
+
+  if (!config) {
+    throw new Error("WHATSAPP_NOT_CONFIGURED");
+  }
+
+  if (!config.connected) {
+    throw new Error("WHATSAPP_NOT_CONNECTED");
+  }
+
+  if (!config.phoneNumberId) {
+    throw new Error("WHATSAPP_PHONE_NUMBER_ID_MISSING");
+  }
+
+  if (!config.accessToken) {
+    throw new Error("WHATSAPP_ACCESS_TOKEN_MISSING");
+  }
+
+  const url =
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/` +
+    `${config.phoneNumberId}/messages`;
+
+  const response = await fetch(url, {
+    method: "POST",
+
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.accessToken}`
+    },
+
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: String(to),
+      type: "text",
+      text: {
+        preview_url: false,
+        body: String(text)
+      }
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("META WHATSAPP SEND ERROR:", data);
+
+    throw new Error(
+      `META_WHATSAPP_SEND_FAILED_${response.status}`
+    );
+  }
+
+  return data;
 }
 
-module.exports = { sendMessage };
+module.exports = {
+  sendMessage
+};
