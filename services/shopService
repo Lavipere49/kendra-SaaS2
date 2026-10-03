@@ -1,42 +1,782 @@
-const { getDb, timestamp } = require("../config/firebase");
+
+  const { getDb, timestamp } = require("../config/firebase");
 const { initializeShopSaaS } = require("./saasService");
 
 const shopsRef = () => getDb().collection("shops");
 
-async function createShop({ ownerId, name, phone = "", plan = "FREE" }) {
-  if (!ownerId || !name) throw new Error("ownerId et name sont obligatoires");
+async function createShop({
+  ownerId,
+  name,
+  phone = "",
+  plan = "FREE"
+}) {
+  if (!ownerId || !name) {
+    throw new Error("ownerId et name sont obligatoires");
+  }
 
   const ref = shopsRef().doc();
+
   const shop = {
-    id: ref.id, ownerId: String(ownerId), name: String(name).trim(),
-    phone: String(phone).trim(), plan, status: "active",
-    createdAt: timestamp(), updatedAt: timestamp()
+    id: ref.id,
+    ownerId: String(ownerId),
+    name: String(name).trim(),
+    phone: String(phone).trim(),
+    plan,
+    status: "active",
+    createdAt: timestamp(),
+    updatedAt: timestamp()
   };
 
   await ref.set(shop);
-  await initializeShopSaaS(ref.id, String(ownerId), plan);
+
+  await initializeShopSaaS(
+    ref.id,
+    String(ownerId),
+    plan
+  );
+
   return shop;
 }
 
 async function getShop(shopId) {
-  const snap = await shopsRef().doc(shopId).get();
-  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+  if (!shopId) return null;
+
+  const snap = await shopsRef()
+    .doc(String(shopId))
+    .get();
+
+  return snap.exists
+    ? {
+        id: snap.id,
+        ...snap.data()
+      }
+    : null;
 }
 
 async function updateShop(shopId, data) {
-  const clean = { ...data };
-  delete clean.id; delete clean.ownerId;
+  if (!shopId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  const clean = {
+    ...data
+  };
+
+  delete clean.id;
+  delete clean.ownerId;
+
   clean.updatedAt = timestamp();
-  await shopsRef().doc(shopId).set(clean, { merge: true });
+
+  await shopsRef()
+    .doc(String(shopId))
+    .set(clean, {
+      merge: true
+    });
+
   return getShop(shopId);
 }
 
 async function getShopsByOwner(ownerId) {
-  const snap = await shopsRef().where("ownerId", "==", String(ownerId)).get();
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  if (!ownerId) return [];
+
+  const snap = await shopsRef()
+    .where("ownerId", "==", String(ownerId))
+    .get();
+
+  return snap.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  }));
 }
 
+/**
+ * Recherche une boutique à partir du Phone Number ID
+ * fourni par Meta lorsqu'un message WhatsApp arrive.
+ *
+ * Structure Firestore attendue :
+ *
+ * shops/{shopId}/whatsapp
+ * {
+ *   phoneNumberId: "...",
+ *   wabaId: "...",
+ *   accessToken: "...",
+ *   connected: true
+ * }
+ */
+async function getShopByWhatsAppPhoneNumberId(
+  phoneNumberId
+) {
+  if (!phoneNumberId) {
+    return null;
+  }
 
-async function resolveCurrentShop(){const configured=String(process.env.KENDRA_SHOP_ID||"").trim();if(configured){const s=await getShop(configured);if(!s)throw new Error("KENDRA_SHOP_CONFIGURED_SHOP_NOT_FOUND");return s}const snap=await shopsRef().where("status","==","active").limit(2).get();if(snap.size===1){const d=snap.docs[0];return{id:d.id,...d.data()}}if(snap.size===0)throw new Error("KENDRA_NO_ACTIVE_SHOP");throw new Error("KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS")}
+  const snap = await shopsRef()
+    .where(
+      "whatsapp.phoneNumberId",
+      "==",
+      String(phoneNumberId)
+    )
+    .limit(1)
+    .get();
 
-module.exports = { createShop, getShop, updateShop, getShopsByOwner, resolveCurrentShop };
+  if (snap.empty) {
+    return null;
+  }
+
+  const doc = snap.docs[0];
+
+  return {
+    id: doc.id,
+    ...doc.data()
+  };
+}
+
+/**
+ * Enregistre ou met à jour la configuration WhatsApp
+ * d'une boutique.
+ *
+ * IMPORTANT :
+ * Le token Meta est stocké dans Firestore et n'est
+ * jamais envoyé au frontend.
+ */
+async function saveWhatsAppConfig(
+  shopId,
+  {
+    phoneNumberId,
+    wabaId,
+    accessToken,
+    connected = true
+  }
+) {
+  if (!shopId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  if (!phoneNumberId) {
+    throw new Error("phoneNumberId est obligatoire");
+  }
+
+  if (!accessToken) {
+    throw new Error("accessToken est obligatoire");
+  }
+
+  const ref = shopsRef().doc(String(shopId));
+
+  const snap = await ref.get();
+
+  if (!snap.exists) {
+    throw new Error("BOUTIQUE_NOT_FOUND");
+  }
+
+  await ref.set(
+    {
+      whatsapp: {
+        phoneNumberId: String(phoneNumberId),
+        wabaId: String(wabaId || ""),
+        accessToken: String(accessToken),
+        connected: Boolean(connected),
+        connectedAt: timestamp(),
+        updatedAt: timestamp()
+      },
+      updatedAt: timestamp()
+    },
+    {
+      merge: true
+    }
+  );
+
+  return getShop(shopId);
+}
+
+/**
+ * Récupère uniquement la configuration WhatsApp
+ * d'une boutique.
+ */
+async function getWhatsAppConfig(shopId) {
+  const shop = await getShop(shopId);
+
+  if (!shop) {
+    throw new Error("BOUTIQUE_NOT_FOUND");
+  }
+
+  if (!shop.whatsapp) {
+    return null;
+  }
+
+  return shop.whatsapp;
+}
+
+/**
+ * Trouve la boutique actuellement configurée.
+ */
+async function resolveCurrentShop() {
+  const configured = String(
+    process.env.KENDRA_SHOP_ID || ""
+  ).trim();
+
+  if (configured) {
+    const s = await getShop(configured);
+
+    if (!s) {
+      throw new Error(
+        "KENDRA_SHOP_CONFIGURED_SHOP_NOT_FOUND"
+      );
+    }
+
+    return s;
+  }
+
+  const snap = await shopsRef()
+    .where("status", "==", "active")
+    .limit(2)
+    .get();
+
+  if (snap.size === 1) {
+    const d = snap.docs[0];
+
+    return {
+      id: d.id,
+      ...d.data()
+    };
+  }
+
+  if (snap.size === 0) {
+    throw new Error(
+      "KENDRA_NO_ACTIVE_SHOP"
+    );
+  }
+
+  throw new Error(
+    "KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS"
+  );
+}
+
+module.exports = {
+  createShop,
+  getShop,
+  updateShop,
+  getShopsByOwner,
+  getShopByWhatsAppPhoneNumberId,
+  saveWhatsAppConfig,
+  getWhatsAppConfig,
+  resolveCurrentShop
+};
+
+
+
+const {
+  getWhatsAppConfig
+} = require("./shopService");
+
+/**
+ * Meta Graph API version.
+ *
+ * Tu peux la modifier lorsque Meta publiera une nouvelle
+ * version stable que tu souhaites utiliser.
+ */
+const META_GRAPH_VERSION =
+  process.env.META_GRAPH_VERSION || "v23.0";
+
+/**
+ * Construit l'URL de l'API WhatsApp Cloud de Meta.
+ */
+function getMessagesUrl(phoneNumberId) {
+  return (
+    `https://graph.facebook.com/` +
+    `${META_GRAPH_VERSION}/` +
+    `${phoneNumberId}/messages`
+  );
+}
+
+/**
+ * Envoie un message texte WhatsApp via Meta.
+ *
+ * La configuration est récupérée depuis la boutique :
+ *
+ * shops/{shopId}/whatsapp
+ */
+async function sendMessage({
+  shopId,
+  to,
+  text
+}) {
+  if (!shopId) {
+    throw new Error("SHOP_ID_REQUIRED");
+  }
+
+  if (!to) {
+    throw new Error("WHATSAPP_RECIPIENT_REQUIRED");
+  }
+
+  if (!text) {
+    throw new Error("WHATSAPP_TEXT_REQUIRED");
+  }
+
+  const config = await getWhatsAppConfig(shopId);
+
+  if (!config) {
+    throw new Error(
+      "WHATSAPP_NOT_CONNECTED_FOR_SHOP"
+    );
+  }
+
+  if (!config.connected) {
+    throw new Error(
+      "WHATSAPP_SHOP_CONNECTION_DISABLED"
+    );
+  }
+
+  if (!config.phoneNumberId) {
+    throw new Error(
+      "WHATSAPP_PHONE_NUMBER_ID_MISSING"
+    );
+  }
+
+  if (!config.accessToken) {
+    throw new Error(
+      "WHATSAPP_ACCESS_TOKEN_MISSING"
+    );
+  }
+
+  const response = await fetch(
+    getMessagesUrl(config.phoneNumberId),
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          `Bearer ${config.accessToken}`
+      },
+
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+
+        recipient_type: "individual",
+
+        to: String(to),
+
+        type: "text",
+
+        text: {
+          preview_url: false,
+          body: String(text)
+        }
+      })
+    }
+  );
+
+  const data = await response
+    .json()
+    .catch(() => ({}));
+
+  if (!response.ok) {
+    console.error(
+      "META WHATSAPP SEND ERROR:",
+      response.status,
+      data
+    );
+
+    throw new Error(
+      data?.error?.message ||
+      `META_WHATSAPP_SEND_FAILED_${response.status}`
+    );
+  }
+
+  return data;
+}
+
+module.exports = {
+  sendMessage
+};
+
+
+const router = require("express").Router();
+
+const whatsapp = require("../services/whatsappService");
+const kendra = require("../services/kendraService");
+
+const {
+  getShopByWhatsAppPhoneNumberId
+} = require("../services/shopService");
+
+/**
+ * =========================================================
+ * META WEBHOOK VERIFICATION
+ * =========================================================
+ *
+ * Meta appelle cette route avec :
+ *
+ * GET /api/whatsapp/webhook
+ *
+ * Paramètres :
+ * hub.mode
+ * hub.verify_token
+ * hub.challenge
+ *
+ * Le token doit être identique à :
+ *
+ * process.env.WHATSAPP_VERIFY_TOKEN
+ */
+router.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+
+  const token =
+    req.query["hub.verify_token"];
+
+  const challenge =
+    req.query["hub.challenge"];
+
+  const verifyToken =
+    String(
+      process.env.WHATSAPP_VERIFY_TOKEN || ""
+    ).trim();
+
+  if (!verifyToken) {
+    console.error(
+      "WHATSAPP_VERIFY_TOKEN n'est pas configuré."
+    );
+
+    return res.sendStatus(500);
+  }
+
+  if (
+    mode === "subscribe" &&
+    token === verifyToken
+  ) {
+    console.log(
+      "META WHATSAPP WEBHOOK VERIFIED"
+    );
+
+    return res
+      .status(200)
+      .send(challenge);
+  }
+
+  console.warn(
+    "META WEBHOOK VERIFICATION FAILED"
+  );
+
+  return res.sendStatus(403);
+});
+
+/**
+ * =========================================================
+ * META WEBHOOK — RÉCEPTION DES MESSAGES
+ * =========================================================
+ *
+ * POST /api/whatsapp/webhook
+ *
+ * Meta envoie ici les messages reçus sur les numéros
+ * WhatsApp connectés aux boutiques.
+ */
+router.post("/webhook", async (req, res) => {
+  /**
+   * Meta attend une réponse HTTP rapide.
+   *
+   * On vérifie d'abord que la notification ressemble
+   * bien à une notification WhatsApp.
+   */
+  try {
+    const body = req.body || {};
+
+    console.log(
+      "META WHATSAPP WEBHOOK:",
+      JSON.stringify(body)
+    );
+
+    if (
+      body.object !== "whatsapp_business_account"
+    ) {
+      return res.sendStatus(404);
+    }
+
+    const entries = Array.isArray(body.entry)
+      ? body.entry
+      : [];
+
+    for (const entry of entries) {
+      const changes = Array.isArray(entry.changes)
+        ? entry.changes
+        : [];
+
+      for (const change of changes) {
+        if (
+          change.field !== "messages"
+        ) {
+          continue;
+        }
+
+        const value = change.value || {};
+
+        const metadata =
+          value.metadata || {};
+
+        /**
+         * C'est l'identifiant du numéro WhatsApp
+         * de la boutique.
+         */
+        const phoneNumberId =
+          metadata.phone_number_id;
+
+        if (!phoneNumberId) {
+          console.warn(
+            "META: phone_number_id manquant"
+          );
+          continue;
+        }
+
+        /**
+         * Recherche automatique de la boutique.
+         */
+        const shop =
+          await getShopByWhatsAppPhoneNumberId(
+            phoneNumberId
+          );
+
+        if (!shop) {
+          console.warn(
+            "Aucune boutique trouvée pour phone_number_id:",
+            phoneNumberId
+          );
+
+          continue;
+        }
+
+        /**
+         * Les messages Meta sont dans value.messages.
+         */
+        const messages =
+          Array.isArray(value.messages)
+            ? value.messages
+            : [];
+
+        for (const message of messages) {
+          /**
+           * Nous traitons pour l'instant
+           * uniquement les messages texte.
+           */
+          if (
+            message.type !== "text"
+          ) {
+            console.log(
+              "Type de message non pris en charge:",
+              message.type
+            );
+
+            continue;
+          }
+
+          const from =
+            message.from;
+
+          const text =
+            message.text?.body;
+
+          if (!from || !text) {
+            continue;
+          }
+
+          /**
+           * On utilise le numéro WhatsApp du client
+           * comme identifiant client.
+           *
+           * Exemple :
+           * customerId = 2376XXXXXXXX
+           */
+          const customerId =
+            String(from);
+
+          console.log(
+            `Message WhatsApp reçu pour ${shop.name}:`,
+            text
+          );
+
+          try {
+            /**
+             * Kendra traite le message.
+             */
+            const result =
+              await kendra.handleMessage({
+                shopId: shop.id,
+
+                customerId,
+
+                text,
+
+                channel: "whatsapp"
+              });
+
+            /**
+             * Kendra répond au client avec
+             * la configuration Meta de cette boutique.
+             */
+            await whatsapp.sendMessage({
+              shopId: shop.id,
+
+              to: from,
+
+              text: result.reply
+            });
+
+          } catch (messageError) {
+            console.error(
+              "KENDRA WHATSAPP MESSAGE ERROR:",
+              messageError
+            );
+          }
+        }
+      }
+    }
+
+    /**
+     * Meta considère la notification reçue.
+     */
+    return res.sendStatus(200);
+
+  } catch (error) {
+    console.error(
+      "META WHATSAPP WEBHOOK ERROR:",
+      error
+    );
+
+    /**
+     * On renvoie 200 pour éviter que Meta considère
+     * immédiatement la notification comme définitivement
+     * échouée.
+     *
+     * Les erreurs sont enregistrées dans les logs Render.
+     */
+    return res.sendStatus(200);
+  }
+});
+
+/**
+ * =========================================================
+ * ROUTE INTERNE : MESSAGE ENTRANT
+ * =========================================================
+ *
+ * Cette route peut rester utile pour les tests internes.
+ *
+ * POST /api/whatsapp/:shopId/incoming
+ */
+router.post(
+  "/:shopId/incoming",
+  async (req, res) => {
+    try {
+      const {
+        customerId,
+        from,
+        text
+      } = req.body;
+
+      if (!customerId || !text) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "customerId et text sont obligatoires"
+        });
+      }
+
+      const result =
+        await kendra.handleMessage({
+          shopId: req.params.shopId,
+
+          customerId,
+
+          text,
+
+          channel: "whatsapp"
+        });
+
+      /**
+       * IMPORTANT :
+       * sendMessage doit maintenant recevoir shopId.
+       */
+      const send =
+        await whatsapp.sendMessage({
+          shopId: req.params.shopId,
+
+          to: from,
+
+          text: result.reply
+        });
+
+      return res.json({
+        success: true,
+
+        reply: result.reply,
+
+        send
+      });
+
+    } catch (e) {
+      console.error(
+        "WHATSAPP INCOMING ERROR:",
+        e
+      );
+
+      return res.status(400).json({
+        success: false,
+        error: e.message
+      });
+    }
+  }
+);
+
+/**
+ * =========================================================
+ * ROUTE INTERNE : ENVOI
+ * =========================================================
+ *
+ * POST /api/whatsapp/:shopId/send
+ */
+router.post(
+  "/:shopId/send",
+  async (req, res) => {
+    try {
+      const {
+        to,
+        text
+      } = req.body;
+
+      if (!to || !text) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "to et text sont obligatoires"
+        });
+      }
+
+      const result =
+        await whatsapp.sendMessage({
+          shopId: req.params.shopId,
+
+          to,
+
+          text
+        });
+
+      return res.json({
+        success: true,
+
+        result
+      });
+
+    } catch (e) {
+      console.error(
+        "WHATSAPP SEND ERROR:",
+        e
+      );
+
+      return res.status(400).json({
+        success: false,
+        error: e.message
+      });
+    }
+  }
+);
+
+module.exports = router;
+
+
