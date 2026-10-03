@@ -1,11 +1,31 @@
-const { getDb, timestamp } = require("../config/firebase");
+const { getDb, timestamp, admin } = require("../config/firebase");
 const { createShop } = require("./shopService");
 
 function cleanEmail(email) {
-  return String(email || "").trim().toLowerCase();
+  return String(email || "")
+    .trim()
+    .toLowerCase();
 }
 
-async function registerMerchant({ name, shopName, email, phone = "", password }) {
+
+/**
+ * =========================================================
+ * INSCRIPTION COMMERÇANT
+ * =========================================================
+ *
+ * 1. Création du compte Firebase Auth
+ * 2. Création automatique de la boutique
+ * 3. Création automatique du profil Firestore
+ * 4. Connexion automatique
+ * 5. Retour des tokens au frontend
+ */
+async function registerMerchant({
+  name,
+  shopName,
+  email,
+  phone = "",
+  password
+}) {
   name = String(name || "").trim();
   shopName = String(shopName || "").trim();
   email = cleanEmail(email);
@@ -13,12 +33,23 @@ async function registerMerchant({ name, shopName, email, phone = "", password })
   password = String(password || "");
 
   if (!name || !shopName || !email || !password) {
-    throw new Error("Nom, boutique, email et mot de passe sont obligatoires.");
+    throw new Error(
+      "Nom, boutique, email et mot de passe sont obligatoires."
+    );
   }
-  if (password.length < 6) throw new Error("Le mot de passe doit contenir au moins 6 caractères.");
 
-  const admin = require("../config/firebase").admin;
+  if (password.length < 6) {
+    throw new Error(
+      "Le mot de passe doit contenir au moins 6 caractères."
+    );
+  }
+
   let user;
+
+  // =======================================================
+  // 1. CRÉATION FIREBASE AUTH
+  // =======================================================
+
   try {
     user = await admin.auth().createUser({
       email,
@@ -26,65 +57,277 @@ async function registerMerchant({ name, shopName, email, phone = "", password })
       displayName: name
     });
   } catch (e) {
-    if (e.code === "auth/email-already-exists") throw new Error("Un compte existe déjà avec cet email.");
+    if (e.code === "auth/email-already-exists") {
+      throw new Error(
+        "Un compte existe déjà avec cet email."
+      );
+    }
+
     throw e;
   }
 
   try {
-    const db = getDb();
-    const shop = await createShop({ ownerId: user.uid, name: shopName, phone, plan: "FREE" });
-    await db.collection("users").doc(user.uid).set({
-      uid: user.uid,
-      name,
-      email,
+    // =====================================================
+    // 2. CRÉATION AUTOMATIQUE DE LA BOUTIQUE
+    // =====================================================
+
+    const shop = await createShop({
+      ownerId: user.uid,
+      name: shopName,
       phone,
-      role: "merchant",
-      shopId: shop.id,
-      createdAt: timestamp(),
-      updatedAt: timestamp()
+      plan: "FREE"
     });
-    return { uid: user.uid, shopId: shop.id, email, name, shopName };
+
+    // =====================================================
+    // 3. CRÉATION AUTOMATIQUE DU PROFIL COMMERÇANT
+    // =====================================================
+
+    const db = getDb();
+
+    await db
+      .collection("users")
+      .doc(user.uid)
+      .set({
+        uid: user.uid,
+        name,
+        email,
+        phone,
+        role: "merchant",
+        shopId: shop.id,
+        createdAt: timestamp(),
+        updatedAt: timestamp()
+      });
+
+    // =====================================================
+    // 4. CONNEXION AUTOMATIQUE
+    // =====================================================
+
+    const apiKey = String(
+      process.env.FIREBASE_WEB_API_KEY || ""
+    ).trim();
+
+    if (!apiKey) {
+      throw new Error(
+        "FIREBASE_WEB_API_KEY n'est pas configurée sur le serveur."
+      );
+    }
+
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(
+        apiKey
+      )}`,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+          email,
+          password,
+          returnSecureToken: true
+        })
+      }
+    );
+
+    const data = await response
+      .json()
+      .catch(() => ({}));
+
+    if (!response.ok) {
+      const messages = {
+        INVALID_LOGIN_CREDENTIALS:
+          "Email ou mot de passe incorrect.",
+
+        EMAIL_NOT_FOUND:
+          "Email ou mot de passe incorrect.",
+
+        INVALID_PASSWORD:
+          "Email ou mot de passe incorrect.",
+
+        USER_DISABLED:
+          "Ce compte a été désactivé."
+      };
+
+      throw new Error(
+        messages[data.error?.message] ||
+        data.error?.message ||
+        "Connexion automatique impossible après inscription."
+      );
+    }
+
+    // =====================================================
+    // 5. VÉRIFICATION DU TOKEN
+    // =====================================================
+
+    const decoded = await admin
+      .auth()
+      .verifyIdToken(data.idToken);
+
+    if (decoded.uid !== user.uid) {
+      throw new Error(
+        "Erreur de vérification du compte."
+      );
+    }
+
+    // =====================================================
+    // 6. RETOUR AU FRONTEND
+    // =====================================================
+
+    return {
+      uid: user.uid,
+      shopId: shop.id,
+      email,
+      name,
+      shopName,
+
+      idToken: data.idToken,
+      refreshToken: data.refreshToken,
+      expiresIn: data.expiresIn
+    };
+
   } catch (e) {
-    // Roll back the Auth user if the Firestore/shop initialization failed.
-    try { await admin.auth().deleteUser(user.uid); } catch (_) {}
+
+    // =====================================================
+    // ROLLBACK
+    // =====================================================
+
+    try {
+      await admin.auth().deleteUser(user.uid);
+    } catch (_) {
+      // Rien à faire si la suppression échoue.
+    }
+
     throw e;
   }
 }
 
-async function loginMerchant({ email, password }) {
-  const apiKey = String(process.env.FIREBASE_WEB_API_KEY || "").trim();
-  if (!apiKey) throw new Error("FIREBASE_WEB_API_KEY n'est pas configurée sur le serveur.");
 
-  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: cleanEmail(email), password: String(password || ""), returnSecureToken: true })
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const messages = {
-      INVALID_LOGIN_CREDENTIALS: "Email ou mot de passe incorrect.",
-      EMAIL_NOT_FOUND: "Email ou mot de passe incorrect.",
-      INVALID_PASSWORD: "Email ou mot de passe incorrect.",
-      USER_DISABLED: "Ce compte a été désactivé."
-    };
-    throw new Error(messages[data.error?.message] || "Connexion impossible.");
+/**
+ * =========================================================
+ * CONNEXION COMMERÇANT
+ * =========================================================
+ */
+async function loginMerchant({
+  email,
+  password
+}) {
+
+  const apiKey = String(
+    process.env.FIREBASE_WEB_API_KEY || ""
+  ).trim();
+
+  if (!apiKey) {
+    throw new Error(
+      "FIREBASE_WEB_API_KEY n'est pas configurée sur le serveur."
+    );
   }
 
-  const admin = require("../config/firebase").admin;
-  const decoded = await admin.auth().verifyIdToken(data.idToken);
-  const snap = await getDb().collection("users").doc(decoded.uid).get();
-  if (!snap.exists) throw new Error("Profil commerçant introuvable.");
+  // =======================================================
+  // CONNEXION FIREBASE AUTH
+  // =======================================================
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(
+      apiKey
+    )}`,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json"
+      },
+
+      body: JSON.stringify({
+        email: cleanEmail(email),
+        password: String(password || ""),
+        returnSecureToken: true
+      })
+    }
+  );
+
+  const data = await response
+    .json()
+    .catch(() => ({}));
+
+  if (!response.ok) {
+
+    const messages = {
+      INVALID_LOGIN_CREDENTIALS:
+        "Email ou mot de passe incorrect.",
+
+      EMAIL_NOT_FOUND:
+        "Email ou mot de passe incorrect.",
+
+      INVALID_PASSWORD:
+        "Email ou mot de passe incorrect.",
+
+      USER_DISABLED:
+        "Ce compte a été désactivé."
+    };
+
+    throw new Error(
+      messages[data.error?.message] ||
+      data.error?.message ||
+      "Connexion impossible."
+    );
+  }
+
+  // =======================================================
+  // VÉRIFICATION FIREBASE ADMIN
+  // =======================================================
+
+  const decoded = await admin
+    .auth()
+    .verifyIdToken(data.idToken);
+
+  // =======================================================
+  // RÉCUPÉRATION DU PROFIL COMMERÇANT
+  // =======================================================
+
+  const snap = await getDb()
+    .collection("users")
+    .doc(decoded.uid)
+    .get();
+
+  if (!snap.exists) {
+    throw new Error(
+      "Profil commerçant introuvable."
+    );
+  }
+
   const profile = snap.data();
-  if (profile.role !== "merchant") throw new Error("Ce compte n'est pas un compte commerçant.");
+
+  if (profile.role !== "merchant") {
+    throw new Error(
+      "Ce compte n'est pas un compte commerçant."
+    );
+  }
+
+  if (!profile.shopId) {
+    throw new Error(
+      "Boutique du commerçant introuvable."
+    );
+  }
+
+  // =======================================================
+  // RETOUR AU FRONTEND
+  // =======================================================
 
   return {
     idToken: data.idToken,
     refreshToken: data.refreshToken,
     expiresIn: data.expiresIn,
+
     uid: decoded.uid,
+
     profile
   };
 }
 
-module.exports = { registerMerchant, loginMerchant };
+
+module.exports = {
+  registerMerchant,
+  loginMerchant
+};
