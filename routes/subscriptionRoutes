@@ -1,37 +1,111 @@
 const router = require("express").Router();
+
 const service = require("../services/subscriptionService");
 const shopService = require("../services/shopService");
 const moneyFusion = require("../services/moneyfusionService");
+
 const { getPlan } = require("../config/plans");
 const { getDb, timestamp } = require("../config/firebase");
+
+
+/*
+|--------------------------------------------------------------------------
+| PLANS
+|--------------------------------------------------------------------------
+*/
 
 router.get("/plans", async (req, res) => {
   try {
     const { PLANS } = require("../config/plans");
-    res.json({ success: true, plans: PLANS });
+
+    res.json({
+      success: true,
+      plans: PLANS
+    });
+
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    console.error("GET /plans:", e);
+
+    res.status(500).json({
+      success: false,
+      error: e.message
+    });
   }
 });
 
-router.get("/:shopId", async (req,res)=>{
+
+/*
+|--------------------------------------------------------------------------
+| ABONNEMENT ACTUEL
+|--------------------------------------------------------------------------
+*/
+
+router.get("/:shopId", async (req, res) => {
   try {
-    res.json({success:true,...await service.getLimits(req.params.shopId)});
-  } catch(e){
-    res.status(500).json({success:false,error:e.message});
+    const result = await service.getLimits(req.params.shopId);
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (e) {
+    console.error("GET subscription:", e);
+
+    res.status(500).json({
+      success: false,
+      error: e.message
+    });
   }
 });
+
+
+/*
+|--------------------------------------------------------------------------
+| CRÉER UN PAIEMENT D'ABONNEMENT
+|--------------------------------------------------------------------------
+*/
 
 router.post("/:shopId/payment", async (req, res) => {
   try {
+
     const shopId = String(req.params.shopId);
-    const planName = String(req.body.plan || "").toUpperCase();
+
+    const planName = String(
+      req.body.plan || ""
+    ).toUpperCase();
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Vérification du forfait
+    |--------------------------------------------------------------------------
+    */
+
     const plan = getPlan(planName);
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Récupération de la boutique
+    |--------------------------------------------------------------------------
+    */
+
     const shop = await shopService.getShop(shopId);
 
     if (!shop) {
-      return res.status(404).json({ success: false, error: "Boutique introuvable" });
+      return res.status(404).json({
+        success: false,
+        error: "Boutique introuvable"
+      });
     }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | FREE ne nécessite pas de paiement
+    |--------------------------------------------------------------------------
+    */
 
     if (plan.name === "FREE") {
       return res.status(400).json({
@@ -40,151 +114,623 @@ router.post("/:shopId/payment", async (req, res) => {
       });
     }
 
-    const phone = String(req.body.phone || shop.phone || "").trim();
-    const customerName = String(
-      req.body.customerName || shop.ownerName || shop.name || "Kendra"
+
+    /*
+    |--------------------------------------------------------------------------
+    | Informations client
+    |--------------------------------------------------------------------------
+    */
+
+    const phone = String(
+      req.body.phone ||
+      shop.phone ||
+      ""
     ).trim();
+
+
+    const customerName = String(
+      req.body.customerName ||
+      shop.ownerName ||
+      shop.name ||
+      "Kendra"
+    ).trim();
+
 
     if (!phone) {
       return res.status(400).json({
         success: false,
-        error: "Le numéro WhatsApp du compte est obligatoire pour lancer le paiement."
+        error:
+          "Le numéro de téléphone est obligatoire pour lancer le paiement."
       });
     }
 
-    const paymentRef = `KENDRA-${shopId}-${Date.now()}`;
-    const webhookUrl = process.env.MONEYFUSION_WEBHOOK_URL || "";
-    const returnUrl = process.env.MONEYFUSION_RETURN_URL || "";
 
-    const payment = await moneyFusion.requestPayment({
-      totalPrice: plan.price,
-      article: [{
-        name: `Abonnement KENDRA ${plan.name}`,
-        price: plan.price,
-        quantity: 1
-      }],
-      numeroSend: phone,
-      nomclient: customerName,
-      userId: shop.ownerId || shopId,
-      orderId: paymentRef,
-      returnUrl,
-      webhookUrl
-    });
+    /*
+    |--------------------------------------------------------------------------
+    | Référence interne
+    |--------------------------------------------------------------------------
+    */
 
-    await getDb().collection("payments").doc(String(payment.token)).set({
-      tokenPay: String(payment.token),
-      shopId,
-      ownerId: String(shop.ownerId || ""),
-      plan: plan.name,
-      amount: plan.price,
-      type: "subscription",
-      status: "pending",
-      phone,
-      customerName,
-      reference: paymentRef,
-      createdAt: timestamp(),
-      updatedAt: timestamp()
-    });
+    const paymentRef =
+      `KENDRA-${shopId}-${Date.now()}`;
 
-    res.json({
-      success: true,
-      plan: plan.name,
-      amount: plan.price,
-      token: payment.token,
-      paymentUrl: payment.url,
-      message: payment.message || "Paiement en cours"
-    });
-  } catch (e) {
-    res.status(400).json({ success:false, error:e.message });
-  }
-});
 
-router.get("/:shopId/payment/:token", async (req, res) => {
-  try {
-    const token = String(req.params.token);
-    const payment = await moneyFusion.checkPayment(token);
-    res.json({ success: true, payment });
-  } catch (e) {
-    res.status(400).json({ success:false, error:e.message });
-  }
-});
+    /*
+    |--------------------------------------------------------------------------
+    | URLs MoneyFusion
+    |--------------------------------------------------------------------------
+    */
 
-router.post("/moneyfusion/webhook", async (req, res) => {
-  try {
-    const body = req.body || {};
-    const token = String(body.tokenPay || body.token || "").trim();
+    const webhookUrl =
+      process.env.MONEYFUSION_WEBHOOK_URL || "";
 
-    if (!token) {
-      return res.status(400).json({ success:false, error:"tokenPay manquant" });
-    }
 
-    const paymentRef = getDb().collection("payments").doc(token);
-    const storedSnap = await paymentRef.get();
+    const returnUrl =
+      process.env.MONEYFUSION_RETURN_URL || "";
 
-    if (!storedSnap.exists) {
-      return res.status(404).json({ success:false, error:"Transaction inconnue" });
-    }
 
-    const stored = storedSnap.data();
+    /*
+    |--------------------------------------------------------------------------
+    | Création du paiement MoneyFusion
+    |--------------------------------------------------------------------------
+    */
 
-    // On confirme toujours le statut auprès de Money Fusion avant
-    // d'activer un abonnement. Le webhook seul ne suffit pas.
-    const verified = await moneyFusion.checkPayment(token);
-    const verifiedData = verified.data || {};
-    const status = String(verifiedData.statut || body.statut || "").toLowerCase();
+    const payment =
+      await moneyFusion.requestPayment({
 
-    if (status === "paid") {
-      if (stored.status !== "paid") {
-        await service.activateSubscription(stored.shopId, stored.plan, 30);
-        await paymentRef.set({
-          status: "paid",
-          transaction: verifiedData,
-          updatedAt: timestamp()
-        }, { merge: true });
-      }
-    } else if (["failure", "no paid", "cancelled", "canceled"].includes(status)) {
-      await paymentRef.set({
-        status: "failed",
-        transaction: verifiedData,
-        updatedAt: timestamp()
-      }, { merge: true });
-    } else {
-      await paymentRef.set({
+        totalPrice: plan.price,
+
+        article: [
+          {
+            name: `Abonnement KENDRA ${plan.name}`,
+            price: plan.price,
+            quantity: 1
+          }
+        ],
+
+        numeroSend: phone,
+
+        nomclient: customerName,
+
+        userId:
+          shop.ownerId ||
+          shopId,
+
+        orderId: paymentRef,
+
+        returnUrl,
+
+        webhookUrl
+      });
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Enregistrement du paiement
+    |--------------------------------------------------------------------------
+    */
+
+    await getDb()
+      .collection("payments")
+      .doc(String(payment.token))
+      .set({
+
+        tokenPay: String(payment.token),
+
+        shopId,
+
+        ownerId:
+          String(shop.ownerId || ""),
+
+        plan: plan.name,
+
+        amount: Number(plan.price),
+
+        type: "subscription",
+
         status: "pending",
-        transaction: verifiedData,
+
+        phone,
+
+        customerName,
+
+        reference: paymentRef,
+
+        createdAt: timestamp(),
+
         updatedAt: timestamp()
-      }, { merge: true });
-    }
 
-    res.json({ success:true, processed:true, status });
+      });
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | Réponse frontend
+    |--------------------------------------------------------------------------
+    */
+
+    return res.json({
+
+      success: true,
+
+      plan: plan.name,
+
+      amount: plan.price,
+
+      token: payment.token,
+
+      paymentUrl: payment.url,
+
+      message:
+        payment.message ||
+        "Paiement en cours"
+
+    });
+
+
   } catch (e) {
-    console.error("Money Fusion webhook:", e);
-    res.status(400).json({ success:false, error:e.message });
-  }
-});
 
-// Route de test manuel réservée au développement local.
-// Elle n'est pas utilisée par le frontend de production.
-router.post("/:shopId/activate", async (req,res)=>{
-  try {
-    if (process.env.NODE_ENV === "production") {
-      return res.status(403).json({success:false,error:"ROUTE_DESACTIVEE_EN_PRODUCTION"});
-    }
-    const sub=await service.activateSubscription(
-      req.params.shopId, req.body.plan || "FREE", req.body.days || 30
+    console.error(
+      "MoneyFusion payment error:",
+      e
     );
-    res.json({success:true,subscription:sub});
-  } catch(e){
-    res.status(400).json({success:false,error:e.message});
+
+    return res.status(400).json({
+
+      success: false,
+
+      error: e.message
+
+    });
   }
 });
 
-router.post("/:shopId/deactivate", async (req,res)=>{
-  try {
-    res.json({success:true,subscription:await service.deactivateSubscription(req.params.shopId)});
-  } catch(e){
-    res.status(400).json({success:false,error:e.message});
+
+/*
+|--------------------------------------------------------------------------
+| VÉRIFIER MANUELLEMENT UN PAIEMENT
+|--------------------------------------------------------------------------
+*/
+
+router.get(
+  "/:shopId/payment/:token",
+  async (req, res) => {
+
+    try {
+
+      const token =
+        String(req.params.token);
+
+
+      const payment =
+        await moneyFusion.checkPayment(
+          token
+        );
+
+
+      res.json({
+
+        success: true,
+
+        payment
+
+      });
+
+
+    } catch (e) {
+
+      console.error(
+        "MoneyFusion status error:",
+        e
+      );
+
+      res.status(400).json({
+
+        success: false,
+
+        error: e.message
+
+      });
+    }
   }
-});
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| WEBHOOK MONEYFUSION
+|--------------------------------------------------------------------------
+*/
+
+router.post(
+  "/moneyfusion/webhook",
+  async (req, res) => {
+
+    try {
+
+      const body = req.body || {};
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | Récupération du token
+      |--------------------------------------------------------------------------
+      */
+
+      const token =
+        String(
+          body.tokenPay ||
+          body.token ||
+          body.data?.tokenPay ||
+          ""
+        ).trim();
+
+
+      if (!token) {
+
+        console.warn(
+          "MoneyFusion webhook: tokenPay manquant",
+          body
+        );
+
+        return res.status(400).json({
+
+          success: false,
+
+          error: "tokenPay manquant"
+
+        });
+      }
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | Recherche du paiement
+      |--------------------------------------------------------------------------
+      */
+
+      const paymentRef =
+        getDb()
+          .collection("payments")
+          .doc(token);
+
+
+      const storedSnap =
+        await paymentRef.get();
+
+
+      if (!storedSnap.exists) {
+
+        console.warn(
+          "MoneyFusion webhook: transaction inconnue",
+          token
+        );
+
+        return res.status(404).json({
+
+          success: false,
+
+          error: "Transaction inconnue"
+
+        });
+      }
+
+
+      const stored =
+        storedSnap.data();
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | Si déjà payé : ne pas réactiver
+      |--------------------------------------------------------------------------
+      */
+
+      if (stored.status === "paid") {
+
+        return res.json({
+
+          success: true,
+
+          processed: true,
+
+          status: "paid",
+
+          message:
+            "Transaction déjà traitée"
+
+        });
+      }
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | Vérification auprès de MoneyFusion
+      |--------------------------------------------------------------------------
+      */
+
+      const verified =
+        await moneyFusion.checkPayment(
+          token
+        );
+
+
+      const verifiedData =
+        verified.data || {};
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | Statut MoneyFusion
+      |--------------------------------------------------------------------------
+      */
+
+      const status =
+        String(
+          verifiedData.statut ||
+          body.statut ||
+          body.status ||
+          ""
+        ).toLowerCase();
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | PAIEMENT RÉUSSI
+      |--------------------------------------------------------------------------
+      */
+
+      if (status === "paid") {
+
+        /*
+        | Activation du forfait
+        */
+
+        const subscription =
+          await service.activateSubscription(
+            stored.shopId,
+            stored.plan,
+            30
+          );
+
+
+        /*
+        | Enregistrement définitif
+        */
+
+        await paymentRef.set({
+
+          status: "paid",
+
+          transaction:
+            verifiedData,
+
+          subscription,
+
+          paidAt: timestamp(),
+
+          updatedAt: timestamp()
+
+        }, {
+          merge: true
+        });
+
+
+        console.log(
+          `MoneyFusion: abonnement ${stored.plan} activé pour ${stored.shopId}`
+        );
+
+
+        return res.json({
+
+          success: true,
+
+          processed: true,
+
+          status: "paid"
+
+        });
+      }
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | PAIEMENT ÉCHOUÉ / ANNULÉ
+      |--------------------------------------------------------------------------
+      */
+
+      const failedStatuses = [
+        "failure",
+        "no paid",
+        "cancelled",
+        "canceled"
+      ];
+
+
+      if (
+        failedStatuses.includes(status)
+      ) {
+
+        await paymentRef.set({
+
+          status: "failed",
+
+          transaction:
+            verifiedData,
+
+          updatedAt: timestamp()
+
+        }, {
+          merge: true
+        });
+
+
+        return res.json({
+
+          success: true,
+
+          processed: true,
+
+          status: "failed"
+
+        });
+      }
+
+
+      /*
+      |--------------------------------------------------------------------------
+      | PAIEMENT EN ATTENTE
+      |--------------------------------------------------------------------------
+      */
+
+      await paymentRef.set({
+
+        status: "pending",
+
+        transaction:
+          verifiedData,
+
+        updatedAt: timestamp()
+
+      }, {
+        merge: true
+      });
+
+
+      return res.json({
+
+        success: true,
+
+        processed: true,
+
+        status: "pending"
+
+      });
+
+
+    } catch (e) {
+
+      console.error(
+        "MoneyFusion webhook error:",
+        e
+      );
+
+
+      return res.status(400).json({
+
+        success: false,
+
+        error: e.message
+
+      });
+    }
+  }
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| ACTIVATION MANUELLE — DÉVELOPPEMENT UNIQUEMENT
+|--------------------------------------------------------------------------
+*/
+
+router.post(
+  "/:shopId/activate",
+  async (req, res) => {
+
+    try {
+
+      if (
+        process.env.NODE_ENV ===
+        "production"
+      ) {
+
+        return res.status(403).json({
+
+          success: false,
+
+          error:
+            "ROUTE_DESACTIVEE_EN_PRODUCTION"
+
+        });
+      }
+
+
+      const subscription =
+        await service.activateSubscription(
+
+          req.params.shopId,
+
+          req.body.plan ||
+            "FREE",
+
+          req.body.days ||
+            30
+        );
+
+
+      res.json({
+
+        success: true,
+
+        subscription
+
+      });
+
+
+    } catch (e) {
+
+      res.status(400).json({
+
+        success: false,
+
+        error: e.message
+
+      });
+    }
+  }
+);
+
+
+/*
+|--------------------------------------------------------------------------
+| DÉSACTIVER UN ABONNEMENT
+|--------------------------------------------------------------------------
+*/
+
+router.post(
+  "/:shopId/deactivate",
+  async (req, res) => {
+
+    try {
+
+      const subscription =
+        await service.deactivateSubscription(
+          req.params.shopId
+        );
+
+
+      res.json({
+
+        success: true,
+
+        subscription
+
+      });
+
+
+    } catch (e) {
+
+      res.status(400).json({
+
+        success: false,
+
+        error: e.message
+
+      });
+    }
+  }
+);
+
 
 module.exports = router;
