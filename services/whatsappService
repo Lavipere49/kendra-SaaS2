@@ -1,4 +1,3 @@
-
 const {
   getShop,
   getWhatsAppConfig,
@@ -165,81 +164,161 @@ async function verifyMetaConfiguration() {
 |
 */
 
-async function connectWhatsApp(shopId) {
-  if (!shopId) {
-    throw new Error("SHOP_ID_MANQUANT");
+async function exchangeEmbeddedSignupCode(code) {
+  const appId = String(process.env.META_APP_ID || "").trim();
+  const appSecret = String(process.env.META_APP_SECRET || "").trim();
+
+  if (!appId || !appSecret) {
+    throw new Error("META_APP_CREDENTIALS_MANQUANTS");
   }
+
+  const params = new URLSearchParams({
+    client_id: appId,
+    client_secret: appSecret,
+    code: String(code)
+  });
+
+  const response = await fetch(
+    `${META_GRAPH_URL}/oauth/access_token?${params.toString()}`,
+    { method: "GET" }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data.access_token) {
+    console.error("META CODE EXCHANGE ERROR:", JSON.stringify(data, null, 2));
+    throw new Error(
+      data?.error?.message ||
+      data?.error?.error_user_msg ||
+      "META_EMBEDDED_SIGNUP_CODE_EXCHANGE_FAILED"
+    );
+  }
+
+  return String(data.access_token);
+}
+
+async function metaRequestWithToken(path, token, options = {}) {
+  const response = await fetch(`${META_GRAPH_URL}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    console.error("Meta API error:", JSON.stringify(data, null, 2));
+    throw new Error(
+      data?.error?.message ||
+      data?.error?.error_user_msg ||
+      `META_API_ERROR_${response.status}`
+    );
+  }
+
+  return data;
+}
+
+async function subscribeAppToWaba(wabaId, accessToken) {
+  return metaRequestWithToken(
+    `/${encodeURIComponent(wabaId)}/subscribed_apps`,
+    accessToken,
+    { method: "POST" }
+  );
+}
+
+async function getWabaPhoneNumbers(wabaId, accessToken) {
+  return metaRequestWithToken(
+    `/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`,
+    accessToken
+  );
+}
+
+async function connectWhatsApp(shopId, options = {}) {
+  if (!shopId) throw new Error("SHOP_ID_MANQUANT");
 
   const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
 
-  if (!shop) {
-    throw new Error("BOUTIQUE_NOT_FOUND");
+  const code = String(options.code || "").trim();
+
+  // Embedded Signup : le code fourni par Meta doit être échangé
+  // côté serveur contre le Business Integration System User token
+  // propre à la boutique.
+  let accessToken;
+  let wabaId = String(options.wabaId || "").trim();
+  let phoneNumberId = String(options.phoneNumberId || "").trim();
+
+  if (code) {
+    accessToken = await exchangeEmbeddedSignupCode(code);
+  } else {
+    // Fallback pour le compte de test déjà configuré dans Render.
+    accessToken = getMetaToken();
+    wabaId = wabaId || getWabaId();
+    phoneNumberId = phoneNumberId || getPhoneNumberId();
   }
 
-  const wabaId = getWabaId();
-  const phoneNumberId =
-    getPhoneNumberId();
-
-  // Vérifie que Meta accepte le token
-  // et que les IDs correspondent.
-  const meta =
-    await verifyMetaConfiguration();
-
-  if (
-    String(meta.waba.id) !==
-    String(wabaId)
-  ) {
-    throw new Error(
-      "META_WABA_ID_INCORRECT"
-    );
+  if (!wabaId) {
+    throw new Error("META_WABA_ID_MANQUANT");
   }
 
-  if (
-    String(meta.phone.id) !==
-    String(phoneNumberId)
-  ) {
-    throw new Error(
-      "META_PHONE_NUMBER_ID_INCORRECT"
-    );
+  // Si Meta n'a pas envoyé le Phone Number ID dans le postMessage,
+  // on le découvre côté serveur.
+  if (!phoneNumberId) {
+    const numbers = await getWabaPhoneNumbers(wabaId, accessToken);
+    const first = Array.isArray(numbers.data) ? numbers.data[0] : null;
+
+    if (!first?.id) {
+      throw new Error("META_PHONE_NUMBER_ID_MANQUANT");
+    }
+
+    phoneNumberId = String(first.id);
   }
 
-  /*
-   * IMPORTANT :
-   * Le token reste uniquement côté serveur.
-   * On l'enregistre dans Firestore afin que
-   * chaque boutique puisse utiliser la configuration.
-   */
+  const waba = await metaRequestWithToken(
+    `/${encodeURIComponent(wabaId)}?fields=id,name`,
+    accessToken
+  );
+
+  const phone = await metaRequestWithToken(
+    `/${encodeURIComponent(phoneNumberId)}?fields=id,display_phone_number,verified_name`,
+    accessToken
+  );
+
+  if (String(waba.id) !== String(wabaId)) {
+    throw new Error("META_WABA_ID_INCORRECT");
+  }
+
+  if (String(phone.id) !== String(phoneNumberId)) {
+    throw new Error("META_PHONE_NUMBER_ID_INCORRECT");
+  }
+
+  // Nécessaire pour que le webhook de Kendra reçoive les événements
+  // du WABA nouvellement connecté.
+  await subscribeAppToWaba(wabaId, accessToken);
+
   await saveWhatsAppConfig(shopId, {
     phoneNumberId,
     wabaId,
-    accessToken: getMetaToken(),
+    accessToken,
     connected: true
   });
 
   await updateShop(shopId, {
-    whatsappDisplayPhoneNumber:
-      meta.phone.displayPhoneNumber || "",
-
-    whatsappVerifiedName:
-      meta.phone.verifiedName || "",
-
-    whatsappWabaName:
-      meta.waba.name || ""
+    whatsappDisplayPhoneNumber: phone.display_phone_number || options.phoneNumber || "",
+    whatsappVerifiedName: phone.verified_name || "",
+    whatsappWabaName: waba.name || ""
   });
 
   return {
     success: true,
     connected: true,
-
     wabaId,
-
     phoneNumberId,
-
-    phoneNumber:
-      meta.phone.displayPhoneNumber || "",
-
-    verifiedName:
-      meta.phone.verifiedName || ""
+    phoneNumber: phone.display_phone_number || options.phoneNumber || "",
+    verifiedName: phone.verified_name || ""
   };
 }
 
