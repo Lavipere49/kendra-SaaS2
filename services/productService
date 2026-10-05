@@ -66,6 +66,20 @@ async function listProducts(shopId, options = {}) {
   return products;
 }
 
+
+
+async function uploadProductImage(shopId, dataUrl, fileName = "product") {
+  if (!shopId) throw new Error("shopId est obligatoire");
+
+  const cloudinary = require("./cloudinaryService");
+
+  return cloudinary.uploadImage({
+    dataUrl,
+    shopId,
+    fileName
+  });
+}
+
 async function updateProduct(shopId, productId, data) {
   const product = await getProduct(shopId, productId);
   if (!product) return null;
@@ -121,6 +135,7 @@ async function updateStock(shopId, productId, stock) {
 
 module.exports = {
   createProduct,
+  uploadProductImage,
   getProduct,
   listProducts,
   updateProduct,
