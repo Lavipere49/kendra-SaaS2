@@ -1,6 +1,26 @@
 const router = require("express").Router();
 const service = require("../services/productService");
 
+router.post("/:shopId/image", async (req, res) => {
+  try {
+    const result = await service.uploadProductImage(
+      req.params.shopId,
+      req.body?.dataUrl,
+      req.body?.fileName
+    );
+
+    res.status(201).json({
+      success: true,
+      ...result
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 router.post("/:shopId", async (req, res) => {
   try {
     const product = await service.createProduct(req.params.shopId, req.body);
