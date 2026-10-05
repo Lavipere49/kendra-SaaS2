@@ -45,7 +45,7 @@ app.use(
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 // --------------------------------------------------
 // Route principale du backend
@@ -70,7 +70,9 @@ app.get("/api/health", (req, res) => {
     database: "firestore",
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     whatsappConfigured: Boolean(
-      process.env.WHAPI_API_URL && process.env.WHAPI_TOKEN
+      process.env.META_APP_ID &&
+      process.env.META_APP_SECRET &&
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN
     ),
   });
 });
@@ -93,7 +95,9 @@ app.get("/api/public-config", (req, res) => {
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
 
     whatsappConfigured: Boolean(
-      process.env.WHAPI_API_URL && process.env.WHAPI_TOKEN
+      process.env.META_APP_ID &&
+      process.env.META_APP_SECRET &&
+      process.env.META_SYSTEM_USER_ACCESS_TOKEN
     ),
   });
 });
@@ -170,7 +174,9 @@ app.listen(PORT, "0.0.0.0", () => {
   );
   console.log(
     "WhatsApp:",
-    process.env.WHAPI_API_URL && process.env.WHAPI_TOKEN
+    process.env.META_APP_ID &&
+    process.env.META_APP_SECRET &&
+    process.env.META_SYSTEM_USER_ACCESS_TOKEN
       ? "configured"
       : "not configured"
   );
