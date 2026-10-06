@@ -1,32 +1,464 @@
 const { getDb, timestamp } = require("../config/firebase");
+const { initializeShopSaaS } = require("./saasService");
 
-async function initializeShopSaaS(shopId, ownerId, plan = "FREE") {
-  const db = getDb();
-  const batch = db.batch();
+const shopsRef = () => getDb().collection("shops");
 
-  batch.set(db.collection("subscriptions").doc(shopId), {
-    shopId, ownerId, plan, status: "active",
-    startedAt: timestamp(), expiresAt: null,
-    createdAt: timestamp(), updatedAt: timestamp()
-  });
+/*
+|--------------------------------------------------------------------------
+| CRÉER UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
 
-  batch.set(db.collection("usage").doc(shopId), {
-    shopId, messages: 0, orders: 0, products: 0, customers: 0,
+async function createShop({
+  ownerId,
+  name,
+  phone = "",
+  plan = "FREE"
+}) {
+  if (!ownerId || !name) {
+    throw new Error(
+      "ownerId et name sont obligatoires"
+    );
+  }
+
+  const ref = shopsRef().doc();
+
+  const shop = {
+    id: ref.id,
+    ownerId: String(ownerId),
+    name: String(name).trim(),
+    phone: String(phone).trim(),
+    plan,
+    status: "active",
+    createdAt: timestamp(),
     updatedAt: timestamp()
-  });
+  };
 
-  await batch.commit();
-  return { subscriptionId: shopId, usageId: shopId };
+  await ref.set(shop);
+
+  await initializeShopSaaS(
+    ref.id,
+    String(ownerId),
+    plan
+  );
+
+  return shop;
 }
 
-async function getSubscription(shopId) {
-  const snap = await getDb().collection("subscriptions").doc(shopId).get();
-  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
+
+async function getShop(shopId) {
+  if (!shopId) {
+    return null;
+  }
+
+  const snap =
+    await shopsRef()
+      .doc(String(shopId))
+      .get();
+
+  if (!snap.exists) {
+    return null;
+  }
+
+  return {
+    id: snap.id,
+    ...snap.data()
+  };
 }
 
-async function getUsage(shopId) {
-  const snap = await getDb().collection("usage").doc(shopId).get();
-  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+/*
+|--------------------------------------------------------------------------
+| METTRE À JOUR UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
+
+async function updateShop(
+  shopId,
+  data
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
+
+  if (!data || typeof data !== "object") {
+    throw new Error(
+      "Les données de mise à jour sont invalides"
+    );
+  }
+
+  const clean = {
+    ...data
+  };
+
+  /*
+   * Ces champs ne doivent jamais être
+   * modifiés par une simple mise à jour.
+   */
+  delete clean.id;
+  delete clean.ownerId;
+
+  clean.updatedAt =
+    timestamp();
+
+  await shopsRef()
+    .doc(String(shopId))
+    .set(
+      clean,
+      {
+        merge: true
+      }
+    );
+
+  return getShop(shopId);
 }
 
-module.exports = { initializeShopSaaS, getSubscription, getUsage };
+/*
+|--------------------------------------------------------------------------
+| BOUTIQUES D'UN PROPRIÉTAIRE
+|--------------------------------------------------------------------------
+*/
+
+async function getShopsByOwner(
+  ownerId
+) {
+  if (!ownerId) {
+    return [];
+  }
+
+  const snap =
+    await shopsRef()
+      .where(
+        "ownerId",
+        "==",
+        String(ownerId)
+      )
+      .get();
+
+  return snap.docs.map(
+    doc => ({
+      id: doc.id,
+      ...doc.data()
+    })
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| TROUVER UNE BOUTIQUE PAR PHONE NUMBER ID META
+|--------------------------------------------------------------------------
+|
+| Meta envoie le Phone Number ID dans le webhook.
+|
+| Exemple :
+|
+| shops/{shopId}
+|   whatsapp.phoneNumberId
+|
+|--------------------------------------------------------------------------
+*/
+
+async function getShopByWhatsAppPhoneNumberId(
+  phoneNumberId
+) {
+  const cleanPhoneNumberId =
+    String(
+      phoneNumberId || ""
+    ).trim();
+
+  if (!cleanPhoneNumberId) {
+    return null;
+  }
+
+  const snap =
+    await shopsRef()
+      .where(
+        "whatsapp.phoneNumberId",
+        "==",
+        cleanPhoneNumberId
+      )
+      .limit(1)
+      .get();
+
+  if (snap.empty) {
+    return null;
+  }
+
+  const doc =
+    snap.docs[0];
+
+  return {
+    id: doc.id,
+    ...doc.data()
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| ENREGISTRER LA CONFIGURATION WHATSAPP
+|--------------------------------------------------------------------------
+|
+| Stockage :
+|
+| shops/{shopId}
+|   whatsapp: {
+|     phoneNumberId,
+|     wabaId,
+|     accessToken,
+|     connected,
+|     connectedAt,
+|     updatedAt
+|   }
+|
+| Le token reste uniquement côté serveur.
+|
+|--------------------------------------------------------------------------
+*/
+
+async function saveWhatsAppConfig(
+  shopId,
+  {
+    phoneNumberId,
+    wabaId,
+    accessToken,
+    connected = true
+  }
+) {
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
+
+  if (!cleanShopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
+
+  const cleanPhoneNumberId =
+    String(
+      phoneNumberId || ""
+    ).trim();
+
+  if (!cleanPhoneNumberId) {
+    throw new Error(
+      "phoneNumberId est obligatoire"
+    );
+  }
+
+  const cleanWabaId =
+    String(
+      wabaId || ""
+    ).trim();
+
+  if (!cleanWabaId) {
+    throw new Error(
+      "wabaId est obligatoire"
+    );
+  }
+
+  const cleanAccessToken =
+    String(
+      accessToken || ""
+    ).trim();
+
+  if (!cleanAccessToken) {
+    throw new Error(
+      "accessToken est obligatoire"
+    );
+  }
+
+  const ref =
+    shopsRef()
+      .doc(cleanShopId);
+
+  const snap =
+    await ref.get();
+
+  if (!snap.exists) {
+    throw new Error(
+      "BOUTIQUE_NOT_FOUND"
+    );
+  }
+
+  const currentShop =
+    snap.data() || {};
+
+  const currentWhatsApp =
+    currentShop.whatsapp || {};
+
+  /*
+   * On conserve les éventuelles données
+   * WhatsApp déjà présentes et on remplace
+   * uniquement les valeurs fournies.
+   */
+  const whatsapp = {
+    ...currentWhatsApp,
+
+    phoneNumberId:
+      cleanPhoneNumberId,
+
+    wabaId:
+      cleanWabaId,
+
+    accessToken:
+      cleanAccessToken,
+
+    connected:
+      Boolean(connected),
+
+    connectedAt:
+      currentWhatsApp.connectedAt ||
+      timestamp(),
+
+    updatedAt:
+      timestamp()
+  };
+
+  await ref.set(
+    {
+      whatsapp,
+
+      updatedAt:
+        timestamp()
+    },
+    {
+      merge: true
+    }
+  );
+
+  return getShop(
+    cleanShopId
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER LA CONFIGURATION WHATSAPP
+|--------------------------------------------------------------------------
+*/
+
+async function getWhatsAppConfig(
+  shopId
+) {
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
+
+  if (!cleanShopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
+
+  const shop =
+    await getShop(
+      cleanShopId
+    );
+
+  if (!shop) {
+    throw new Error(
+      "BOUTIQUE_NOT_FOUND"
+    );
+  }
+
+  if (
+    !shop.whatsapp ||
+    typeof shop.whatsapp !==
+      "object"
+  ) {
+    return null;
+  }
+
+  return shop.whatsapp;
+}
+
+/*
+|--------------------------------------------------------------------------
+| RÉSOUDRE LA BOUTIQUE KENDRA COURANTE
+|--------------------------------------------------------------------------
+*/
+
+async function resolveCurrentShop() {
+  const configured =
+    String(
+      process.env.KENDRA_SHOP_ID ||
+      ""
+    ).trim();
+
+  /*
+   * Si une boutique est explicitement
+   * configurée dans Render.
+   */
+  if (configured) {
+    const shop =
+      await getShop(
+        configured
+      );
+
+    if (!shop) {
+      throw new Error(
+        "KENDRA_SHOP_CONFIGURED_SHOP_NOT_FOUND"
+      );
+    }
+
+    return shop;
+  }
+
+  /*
+   * Sinon, chercher une seule boutique active.
+   */
+  const snap =
+    await shopsRef()
+      .where(
+        "status",
+        "==",
+        "active"
+      )
+      .limit(2)
+      .get();
+
+  if (snap.size === 1) {
+    const doc =
+      snap.docs[0];
+
+    return {
+      id: doc.id,
+      ...doc.data()
+    };
+  }
+
+  if (snap.size === 0) {
+    throw new Error(
+      "KENDRA_NO_ACTIVE_SHOP"
+    );
+  }
+
+  throw new Error(
+    "KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
+
+module.exports = {
+  createShop,
+  getShop,
+  updateShop,
+  getShopsByOwner,
+  getShopByWhatsAppPhoneNumberId,
+  saveWhatsAppConfig,
+  getWhatsAppConfig,
+  resolveCurrentShop
+};
