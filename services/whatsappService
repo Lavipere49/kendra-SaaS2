@@ -316,6 +316,151 @@ async function exchangeEmbeddedSignupCode(
 
 /*
 |--------------------------------------------------------------------------
+| DÉCOUVERTE AUTOMATIQUE DU WABA APRÈS COEXISTENCE
+|--------------------------------------------------------------------------
+|
+| Le flux WhatsApp Business App Onboarding peut terminer avec un code
+| valide alors que le WABA/Phone Number ID n'est pas présent dans le
+| message reçu par la fenêtre parente. On ne bloque donc plus le
+| commerçant sur ces IDs.
+|
+| Le backend utilise le token issu de l'échange OAuth pour retrouver les
+| WABAs accessibles, puis choisit le numéro fourni par Meta lorsqu'il est
+| disponible. Le token ne quitte jamais le serveur.
+|
+|--------------------------------------------------------------------------
+*/
+
+async function getBusinessesForToken(accessToken) {
+  const data = await metaRequestWithToken(
+    `/me/businesses?fields=id,name&limit=100`,
+    accessToken
+  );
+
+  return Array.isArray(data?.data)
+    ? data.data
+    : [];
+}
+
+async function getClientWabasForBusiness(
+  businessId,
+  accessToken
+) {
+  const data = await metaRequestWithToken(
+    `/${encodeURIComponent(businessId)}/client_whatsapp_business_accounts?fields=id,name,currency,timezone_id&limit=100`,
+    accessToken
+  );
+
+  return Array.isArray(data?.data)
+    ? data.data
+    : [];
+}
+
+async function discoverWabaForToken({
+  accessToken,
+  wabaId = "",
+  phoneNumberId = "",
+  phoneNumber = ""
+}) {
+  let cleanWabaId = String(wabaId || "").trim();
+  let cleanPhoneNumberId = String(phoneNumberId || "").trim();
+  const cleanPhoneNumber = String(phoneNumber || "").replace(/[^0-9+]/g, "");
+
+  if (cleanWabaId) {
+    return {
+      wabaId: cleanWabaId,
+      phoneNumberId: cleanPhoneNumberId
+    };
+  }
+
+  const businesses = await getBusinessesForToken(accessToken);
+
+  for (const business of businesses) {
+    if (!business?.id) continue;
+
+    let wabas = [];
+
+    try {
+      wabas = await getClientWabasForBusiness(
+        business.id,
+        accessToken
+      );
+    } catch (error) {
+      console.warn(
+        "Impossible de récupérer les WABAs du business Meta:",
+        business.id,
+        error.message
+      );
+      continue;
+    }
+
+    for (const waba of wabas) {
+      if (!waba?.id) continue;
+
+      const numbers = await getWabaPhoneNumbers(
+        String(waba.id),
+        accessToken
+      );
+
+      const list = Array.isArray(numbers?.data)
+        ? numbers.data
+        : [];
+
+      if (cleanPhoneNumberId) {
+        const match = list.find(
+          item => String(item?.id || "") === cleanPhoneNumberId
+        );
+
+        if (match) {
+          cleanWabaId = String(waba.id);
+          return {
+            wabaId: cleanWabaId,
+            phoneNumberId: cleanPhoneNumberId
+          };
+        }
+      }
+
+      if (cleanPhoneNumber) {
+        const match = list.find(item => {
+          const candidate = String(
+            item?.display_phone_number || ""
+          ).replace(/[^0-9+]/g, "");
+
+          return candidate === cleanPhoneNumber;
+        });
+
+        if (match?.id) {
+          cleanWabaId = String(waba.id);
+          return {
+            wabaId: cleanWabaId,
+            phoneNumberId: String(match.id)
+          };
+        }
+      }
+
+      /*
+       * Coexistence est généralement un onboarding d'un numéro unique.
+       * Si aucun numéro n'a été fourni par la session, utiliser le premier
+       * numéro accessible dans le WABA trouvé.
+       */
+      if (!cleanPhoneNumberId && !cleanPhoneNumber && list[0]?.id) {
+        cleanWabaId = String(waba.id);
+        return {
+          wabaId: cleanWabaId,
+          phoneNumberId: String(list[0].id)
+        };
+      }
+    }
+  }
+
+  return {
+    wabaId: "",
+    phoneNumberId: cleanPhoneNumberId
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
 | NUMÉROS D'UN WABA
 |--------------------------------------------------------------------------
 */
@@ -453,25 +598,33 @@ async function connectWhatsApp(
 
   /*
    * ---------------------------------------------------------------
-   * WABA ID
+   * DÉCOUVERTE AUTOMATIQUE DES ASSETS
    * ---------------------------------------------------------------
+   *
+   * En mode Coexistence, les IDs peuvent arriver dans le message de
+   * session ou ne pas être transmis au parent. Le backend tente donc
+   * de les résoudre à partir du token OAuth avant toute vérification.
    */
+
+  const discovered =
+    await discoverWabaForToken({
+      accessToken,
+      wabaId,
+      phoneNumberId,
+      phoneNumber: options.phoneNumber || ""
+    });
+
+  wabaId =
+    String(discovered.wabaId || "").trim();
+
+  phoneNumberId =
+    String(discovered.phoneNumberId || "").trim();
 
   if (!wabaId) {
     throw new Error(
-      "META_WABA_ID_MANQUANT"
+      "META_WABA_ID_NON_RECUPERE_APRES_ONBOARDING"
     );
   }
-
-  /*
-   * ---------------------------------------------------------------
-   * PHONE NUMBER ID
-   * ---------------------------------------------------------------
-   *
-   * Normalement Embedded Signup fournit cet ID.
-   *
-   * Si absent, on le récupère depuis le WABA.
-   */
 
   if (!phoneNumberId) {
     const numbers =
@@ -481,20 +634,17 @@ async function connectWhatsApp(
       );
 
     const first =
-      Array.isArray(
-        numbers.data
-      )
+      Array.isArray(numbers.data)
         ? numbers.data[0]
         : null;
 
     if (!first?.id) {
       throw new Error(
-        "META_PHONE_NUMBER_ID_MANQUANT"
+        "META_PHONE_NUMBER_ID_NON_RECUPERE_APRES_ONBOARDING"
       );
     }
 
-    phoneNumberId =
-      String(first.id);
+    phoneNumberId = String(first.id);
   }
 
   /*
