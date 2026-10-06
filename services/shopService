@@ -3,6 +3,12 @@ const { initializeShopSaaS } = require("./saasService");
 
 const shopsRef = () => getDb().collection("shops");
 
+/*
+|--------------------------------------------------------------------------
+| CRÉER UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
+
 async function createShop({
   ownerId,
   name,
@@ -10,7 +16,9 @@ async function createShop({
   plan = "FREE"
 }) {
   if (!ownerId || !name) {
-    throw new Error("ownerId et name sont obligatoires");
+    throw new Error(
+      "ownerId et name sont obligatoires"
+    );
   }
 
   const ref = shopsRef().doc();
@@ -37,92 +45,153 @@ async function createShop({
   return shop;
 }
 
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
+
 async function getShop(shopId) {
-  if (!shopId) return null;
+  if (!shopId) {
+    return null;
+  }
 
-  const snap = await shopsRef()
-    .doc(String(shopId))
-    .get();
+  const snap =
+    await shopsRef()
+      .doc(String(shopId))
+      .get();
 
-  return snap.exists
-    ? {
-        id: snap.id,
-        ...snap.data()
-      }
-    : null;
+  if (!snap.exists) {
+    return null;
+  }
+
+  return {
+    id: snap.id,
+    ...snap.data()
+  };
 }
 
-async function updateShop(shopId, data) {
+/*
+|--------------------------------------------------------------------------
+| METTRE À JOUR UNE BOUTIQUE
+|--------------------------------------------------------------------------
+*/
+
+async function updateShop(
+  shopId,
+  data
+) {
   if (!shopId) {
-    throw new Error("shopId est obligatoire");
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
+
+  if (!data || typeof data !== "object") {
+    throw new Error(
+      "Les données de mise à jour sont invalides"
+    );
   }
 
   const clean = {
     ...data
   };
 
+  /*
+   * Ces champs ne doivent jamais être
+   * modifiés par une simple mise à jour.
+   */
   delete clean.id;
   delete clean.ownerId;
 
-  clean.updatedAt = timestamp();
+  clean.updatedAt =
+    timestamp();
 
   await shopsRef()
     .doc(String(shopId))
-    .set(clean, {
-      merge: true
-    });
+    .set(
+      clean,
+      {
+        merge: true
+      }
+    );
 
   return getShop(shopId);
 }
 
-async function getShopsByOwner(ownerId) {
-  if (!ownerId) return [];
+/*
+|--------------------------------------------------------------------------
+| BOUTIQUES D'UN PROPRIÉTAIRE
+|--------------------------------------------------------------------------
+*/
 
-  const snap = await shopsRef()
-    .where("ownerId", "==", String(ownerId))
-    .get();
+async function getShopsByOwner(
+  ownerId
+) {
+  if (!ownerId) {
+    return [];
+  }
 
-  return snap.docs.map(doc => ({
-    id: doc.id,
-    ...doc.data()
-  }));
+  const snap =
+    await shopsRef()
+      .where(
+        "ownerId",
+        "==",
+        String(ownerId)
+      )
+      .get();
+
+  return snap.docs.map(
+    doc => ({
+      id: doc.id,
+      ...doc.data()
+    })
+  );
 }
 
-/**
- * Recherche une boutique à partir du Phone Number ID
- * fourni par Meta lorsqu'un message WhatsApp arrive.
- *
- * Structure Firestore attendue :
- *
- * shops/{shopId}/whatsapp
- * {
- *   phoneNumberId: "...",
- *   wabaId: "...",
- *   accessToken: "...",
- *   connected: true
- * }
- */
+/*
+|--------------------------------------------------------------------------
+| TROUVER UNE BOUTIQUE PAR PHONE NUMBER ID META
+|--------------------------------------------------------------------------
+|
+| Meta envoie le Phone Number ID dans le webhook.
+|
+| Exemple :
+|
+| shops/{shopId}
+|   whatsapp.phoneNumberId
+|
+|--------------------------------------------------------------------------
+*/
+
 async function getShopByWhatsAppPhoneNumberId(
   phoneNumberId
 ) {
-  if (!phoneNumberId) {
+  const cleanPhoneNumberId =
+    String(
+      phoneNumberId || ""
+    ).trim();
+
+  if (!cleanPhoneNumberId) {
     return null;
   }
 
-  const snap = await shopsRef()
-    .where(
-      "whatsapp.phoneNumberId",
-      "==",
-      String(phoneNumberId)
-    )
-    .limit(1)
-    .get();
+  const snap =
+    await shopsRef()
+      .where(
+        "whatsapp.phoneNumberId",
+        "==",
+        cleanPhoneNumberId
+      )
+      .limit(1)
+      .get();
 
   if (snap.empty) {
     return null;
   }
 
-  const doc = snap.docs[0];
+  const doc =
+    snap.docs[0];
 
   return {
     id: doc.id,
@@ -130,14 +199,28 @@ async function getShopByWhatsAppPhoneNumberId(
   };
 }
 
-/**
- * Enregistre ou met à jour la configuration WhatsApp
- * d'une boutique.
- *
- * IMPORTANT :
- * Le token Meta est stocké dans Firestore et n'est
- * jamais envoyé au frontend.
- */
+/*
+|--------------------------------------------------------------------------
+| ENREGISTRER LA CONFIGURATION WHATSAPP
+|--------------------------------------------------------------------------
+|
+| Stockage :
+|
+| shops/{shopId}
+|   whatsapp: {
+|     phoneNumberId,
+|     wabaId,
+|     accessToken,
+|     connected,
+|     connectedAt,
+|     updatedAt
+|   }
+|
+| Le token reste uniquement côté serveur.
+|
+|--------------------------------------------------------------------------
+*/
+
 async function saveWhatsAppConfig(
   shopId,
   {
@@ -147,95 +230,208 @@ async function saveWhatsAppConfig(
     connected = true
   }
 ) {
-  if (!shopId) {
-    throw new Error("shopId est obligatoire");
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
+
+  if (!cleanShopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  if (!phoneNumberId) {
-    throw new Error("phoneNumberId est obligatoire");
+  const cleanPhoneNumberId =
+    String(
+      phoneNumberId || ""
+    ).trim();
+
+  if (!cleanPhoneNumberId) {
+    throw new Error(
+      "phoneNumberId est obligatoire"
+    );
   }
 
-  if (!accessToken) {
-    throw new Error("accessToken est obligatoire");
+  const cleanWabaId =
+    String(
+      wabaId || ""
+    ).trim();
+
+  if (!cleanWabaId) {
+    throw new Error(
+      "wabaId est obligatoire"
+    );
   }
 
-  const ref = shopsRef().doc(String(shopId));
+  const cleanAccessToken =
+    String(
+      accessToken || ""
+    ).trim();
 
-  const snap = await ref.get();
+  if (!cleanAccessToken) {
+    throw new Error(
+      "accessToken est obligatoire"
+    );
+  }
+
+  const ref =
+    shopsRef()
+      .doc(cleanShopId);
+
+  const snap =
+    await ref.get();
 
   if (!snap.exists) {
-    throw new Error("BOUTIQUE_NOT_FOUND");
+    throw new Error(
+      "BOUTIQUE_NOT_FOUND"
+    );
   }
+
+  const currentShop =
+    snap.data() || {};
+
+  const currentWhatsApp =
+    currentShop.whatsapp || {};
+
+  /*
+   * On conserve les éventuelles données
+   * WhatsApp déjà présentes et on remplace
+   * uniquement les valeurs fournies.
+   */
+  const whatsapp = {
+    ...currentWhatsApp,
+
+    phoneNumberId:
+      cleanPhoneNumberId,
+
+    wabaId:
+      cleanWabaId,
+
+    accessToken:
+      cleanAccessToken,
+
+    connected:
+      Boolean(connected),
+
+    connectedAt:
+      currentWhatsApp.connectedAt ||
+      timestamp(),
+
+    updatedAt:
+      timestamp()
+  };
 
   await ref.set(
     {
-      whatsapp: {
-        phoneNumberId: String(phoneNumberId),
-        wabaId: String(wabaId || ""),
-        accessToken: String(accessToken),
-        connected: Boolean(connected),
-        connectedAt: timestamp(),
-        updatedAt: timestamp()
-      },
-      updatedAt: timestamp()
+      whatsapp,
+
+      updatedAt:
+        timestamp()
     },
     {
       merge: true
     }
   );
 
-  return getShop(shopId);
+  return getShop(
+    cleanShopId
+  );
 }
 
-/**
- * Récupère uniquement la configuration WhatsApp
- * d'une boutique.
- */
-async function getWhatsAppConfig(shopId) {
-  const shop = await getShop(shopId);
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER LA CONFIGURATION WHATSAPP
+|--------------------------------------------------------------------------
+*/
 
-  if (!shop) {
-    throw new Error("BOUTIQUE_NOT_FOUND");
+async function getWhatsAppConfig(
+  shopId
+) {
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
+
+  if (!cleanShopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  if (!shop.whatsapp) {
+  const shop =
+    await getShop(
+      cleanShopId
+    );
+
+  if (!shop) {
+    throw new Error(
+      "BOUTIQUE_NOT_FOUND"
+    );
+  }
+
+  if (
+    !shop.whatsapp ||
+    typeof shop.whatsapp !==
+      "object"
+  ) {
     return null;
   }
 
   return shop.whatsapp;
 }
 
-/**
- * Trouve la boutique actuellement configurée.
- */
+/*
+|--------------------------------------------------------------------------
+| RÉSOUDRE LA BOUTIQUE KENDRA COURANTE
+|--------------------------------------------------------------------------
+*/
+
 async function resolveCurrentShop() {
-  const configured = String(
-    process.env.KENDRA_SHOP_ID || ""
-  ).trim();
+  const configured =
+    String(
+      process.env.KENDRA_SHOP_ID ||
+      ""
+    ).trim();
 
+  /*
+   * Si une boutique est explicitement
+   * configurée dans Render.
+   */
   if (configured) {
-    const s = await getShop(configured);
+    const shop =
+      await getShop(
+        configured
+      );
 
-    if (!s) {
+    if (!shop) {
       throw new Error(
         "KENDRA_SHOP_CONFIGURED_SHOP_NOT_FOUND"
       );
     }
 
-    return s;
+    return shop;
   }
 
-  const snap = await shopsRef()
-    .where("status", "==", "active")
-    .limit(2)
-    .get();
+  /*
+   * Sinon, chercher une seule boutique active.
+   */
+  const snap =
+    await shopsRef()
+      .where(
+        "status",
+        "==",
+        "active"
+      )
+      .limit(2)
+      .get();
 
   if (snap.size === 1) {
-    const d = snap.docs[0];
+    const doc =
+      snap.docs[0];
 
     return {
-      id: d.id,
-      ...d.data()
+      id: doc.id,
+      ...doc.data()
     };
   }
 
@@ -250,13 +446,10 @@ async function resolveCurrentShop() {
   );
 }
 
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
+
 module.exports = {
-  createShop,
-  getShop,
-  updateShop,
-  getShopsByOwner,
-  getShopByWhatsAppPhoneNumberId,
-  saveWhatsAppConfig,
-  getWhatsAppConfig,
-  resolveCurrentShop
-};
