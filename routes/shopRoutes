@@ -6,7 +6,8 @@ router.get("/current", async (req, res) => {
     const shop = await service.resolveCurrentShop();
     res.json({ success: true, shop });
   } catch (e) {
-    res.status(e.message === "KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS" ? 409 : 404)
+    res
+      .status(e.message === "KENDRA_SHOP_ID_REQUIRED_FOR_MULTIPLE_SHOPS" ? 409 : 404)
       .json({ success: false, error: e.message });
   }
 });
