@@ -1,54 +1,133 @@
 const { getDb, timestamp } = require("../config/firebase");
 const subscriptionService = require("./subscriptionService");
+const admin = require("firebase-admin");
 
-async function createOrder(shopId, data) {
-  if (!shopId) throw new Error("shopId est obligatoire");
-  await subscriptionService.assertActive(shopId);
-  const orderLimit = await subscriptionService.canUse(shopId, "orders", 1);
-  if (!orderLimit.allowed) throw new Error(orderLimit.reason);
-  if (!data.customerId) throw new Error("customerId est obligatoire");
+const FieldValue = admin.firestore.FieldValue;
+
+function cleanId(value) {
+  return String(value || "").trim();
+}
+
+async function createOrder(shopId, data = {}) {
+  const cleanShopId = cleanId(shopId);
+
+  if (!cleanShopId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  await subscriptionService.assertActive(cleanShopId);
+
+  const orderLimit = await subscriptionService.canUse(
+    cleanShopId,
+    "orders",
+    1
+  );
+
+  if (!orderLimit.allowed) {
+    throw new Error(orderLimit.reason);
+  }
+
+  const customerId = cleanId(data.customerId);
+
+  if (!customerId) {
+    throw new Error("customerId est obligatoire");
+  }
+
   if (!Array.isArray(data.items) || data.items.length === 0) {
     throw new Error("La commande doit contenir au moins un produit");
   }
 
   const db = getDb();
-  const customerRef = db.collection("customers").doc(data.customerId);
+
+  const customerRef = db
+    .collection("customers")
+    .doc(customerId);
+
   const customerSnap = await customerRef.get();
 
-  if (!customerSnap.exists || customerSnap.data().shopId !== String(shopId)) {
+  if (
+    !customerSnap.exists ||
+    String(customerSnap.data().shopId) !== cleanShopId
+  ) {
     throw new Error("Client invalide pour cette boutique");
   }
 
-  let total = 0;
-  const items = [];
+  /*
+   * On regroupe les mêmes produits s'ils apparaissent plusieurs fois
+   * dans la commande.
+   */
+  const requestedItems = new Map();
 
   for (const item of data.items) {
-    if (!item.productId || Number(item.quantity) <= 0) {
+    const productId = cleanId(item.productId);
+    const quantity = Number(item.quantity);
+
+    if (
+      !productId ||
+      !Number.isInteger(quantity) ||
+      quantity <= 0
+    ) {
       throw new Error("Article de commande invalide");
     }
 
-    const productSnap = await db.collection("products").doc(item.productId).get();
+    requestedItems.set(
+      productId,
+      (requestedItems.get(productId) || 0) + quantity
+    );
+  }
 
-    if (!productSnap.exists || productSnap.data().shopId !== String(shopId)) {
-      throw new Error("Produit invalide pour cette boutique");
+  const items = [];
+  let total = 0;
+
+  /*
+   * On récupère et vérifie tous les produits avant d'écrire.
+   */
+  for (const [productId, quantity] of requestedItems.entries()) {
+    const productRef = db
+      .collection("products")
+      .doc(productId);
+
+    const productSnap = await productRef.get();
+
+    if (!productSnap.exists) {
+      throw new Error("Produit introuvable");
     }
 
     const product = productSnap.data();
-    const quantity = Number(item.quantity);
 
-    if (Number(product.stock) < quantity) {
+    if (String(product.shopId) !== cleanShopId) {
+      throw new Error("Produit invalide pour cette boutique");
+    }
+
+    if (product.active === false) {
+      throw new Error(`Le produit ${product.name} est indisponible`);
+    }
+
+    const stock = Number(product.stock);
+    const unitPrice = Number(product.price);
+
+    if (!Number.isFinite(stock) || stock < 0) {
+      throw new Error(`Stock invalide pour ${product.name}`);
+    }
+
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+      throw new Error(`Prix invalide pour ${product.name}`);
+    }
+
+    if (stock < quantity) {
       throw new Error(`Stock insuffisant pour ${product.name}`);
     }
 
-    const unitPrice = Number(product.price);
-    total += unitPrice * quantity;
+    const subtotal = unitPrice * quantity;
+
+    total += subtotal;
 
     items.push({
       productId: productSnap.id,
       name: product.name,
       quantity,
       unitPrice,
-      subtotal: unitPrice * quantity
+      subtotal
     });
   }
 
@@ -56,69 +135,216 @@ async function createOrder(shopId, data) {
 
   const order = {
     id: orderRef.id,
-    shopId: String(shopId),
-    customerId: String(data.customerId),
+    shopId: cleanShopId,
+    customerId,
     items,
     total,
+
     status: data.status || "pending",
     paymentStatus: data.paymentStatus || "unpaid",
+
     source: data.source || "kendra",
+
     createdAt: timestamp(),
     updatedAt: timestamp()
   };
 
-  const batch = db.batch();
-  batch.set(orderRef, order);
+  /*
+   * Transaction Firestore :
+   * - vérifie une dernière fois le stock
+   * - décrémente le stock
+   * - crée la commande
+   * - met à jour le client
+   *
+   * Tout réussit ou rien n'est écrit.
+   */
+  await db.runTransaction(async transaction => {
+    const productRefs = items.map(item =>
+      db.collection("products").doc(item.productId)
+    );
 
-  for (const item of items) {
-    const productRef = db.collection("products").doc(item.productId);
-    batch.update(productRef, {
-      stock: require("firebase-admin").firestore.FieldValue.increment(-item.quantity),
+    const productSnapshots = [];
+
+    for (const ref of productRefs) {
+      const snap = await transaction.get(ref);
+      productSnapshots.push(snap);
+    }
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const productSnap = productSnapshots[i];
+
+      if (!productSnap.exists) {
+        throw new Error("Produit introuvable pendant la transaction");
+      }
+
+      const product = productSnap.data();
+      const currentStock = Number(product.stock);
+
+      if (currentStock < item.quantity) {
+        throw new Error(`Stock insuffisant pour ${item.name}`);
+      }
+
+      transaction.update(productRefs[i], {
+        stock: FieldValue.increment(-item.quantity),
+        updatedAt: timestamp()
+      });
+    }
+
+    transaction.set(orderRef, order);
+
+    transaction.update(customerRef, {
+      totalOrders: FieldValue.increment(1),
+      totalSpent: FieldValue.increment(total),
+      lastContactAt: timestamp(),
       updatedAt: timestamp()
     });
-  }
-
-  batch.update(customerRef, {
-    totalOrders: require("firebase-admin").firestore.FieldValue.increment(1),
-    totalSpent: require("firebase-admin").firestore.FieldValue.increment(total),
-    lastContactAt: timestamp(),
-    updatedAt: timestamp()
   });
 
-  batch.set(db.collection("usage").doc(String(shopId)), {
-    orders: require("firebase-admin").firestore.FieldValue.increment(1),
-    updatedAt: timestamp()
-  }, { merge: true });
+  /*
+   * Mise à jour de l'utilisation après la création réussie
+   * de la commande.
+   */
+  await db.collection("usage").doc(cleanShopId).set(
+    {
+      orders: FieldValue.increment(1),
+      updatedAt: timestamp()
+    },
+    { merge: true }
+  );
 
-  await batch.commit();
   return order;
 }
 
 async function getOrder(shopId, orderId) {
-  const snap = await getDb().collection("orders").doc(orderId).get();
-  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
-  return { id: snap.id, ...snap.data() };
+  const cleanShopId = cleanId(shopId);
+  const cleanOrderId = cleanId(orderId);
+
+  if (!cleanShopId || !cleanOrderId) {
+    return null;
+  }
+
+  const snap = await getDb()
+    .collection("orders")
+    .doc(cleanOrderId)
+    .get();
+
+  if (!snap.exists) {
+    return null;
+  }
+
+  const data = snap.data();
+
+  if (String(data.shopId) !== cleanShopId) {
+    return null;
+  }
+
+  return {
+    id: snap.id,
+    ...data
+  };
 }
 
 async function listOrders(shopId) {
-  const snap = await getDb().collection("orders")
-    .where("shopId", "==", String(shopId)).get();
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  const cleanShopId = cleanId(shopId);
+
+  if (!cleanShopId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  const snap = await getDb()
+    .collection("orders")
+    .where("shopId", "==", cleanShopId)
+    .get();
+
+  const orders = snap.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  }));
+
+  /*
+   * Les commandes les plus récentes apparaissent en premier.
+   */
+  orders.sort((a, b) => {
+    const aTime = a.createdAt?.toMillis
+      ? a.createdAt.toMillis()
+      : 0;
+
+    const bTime = b.createdAt?.toMillis
+      ? b.createdAt.toMillis()
+      : 0;
+
+    return bTime - aTime;
+  });
+
+  return orders;
 }
 
-async function updateOrder(shopId, orderId, data) {
-  const order = await getOrder(shopId, orderId);
-  if (!order) return null;
+async function updateOrder(shopId, orderId, data = {}) {
+  const cleanShopId = cleanId(shopId);
+  const cleanOrderId = cleanId(orderId);
 
-  const allowed = ["status", "paymentStatus"];
-  const update = {};
-  for (const key of allowed) {
-    if (data[key] !== undefined) update[key] = data[key];
+  if (!cleanShopId || !cleanOrderId) {
+    throw new Error("shopId et orderId sont obligatoires");
   }
+
+  const order = await getOrder(
+    cleanShopId,
+    cleanOrderId
+  );
+
+  if (!order) {
+    return null;
+  }
+
+  const update = {};
+
+  const allowedStatuses = [
+    "pending",
+    "confirmed",
+    "processing",
+    "shipped",
+    "delivered",
+    "cancelled"
+  ];
+
+  const allowedPaymentStatuses = [
+    "unpaid",
+    "pending",
+    "paid",
+    "failed",
+    "refunded"
+  ];
+
+  if (data.status !== undefined) {
+    if (!allowedStatuses.includes(data.status)) {
+      throw new Error("Statut de commande invalide");
+    }
+
+    update.status = data.status;
+  }
+
+  if (data.paymentStatus !== undefined) {
+    if (!allowedPaymentStatuses.includes(data.paymentStatus)) {
+      throw new Error("Statut de paiement invalide");
+    }
+
+    update.paymentStatus = data.paymentStatus;
+  }
+
   update.updatedAt = timestamp();
 
-  await getDb().collection("orders").doc(orderId).update(update);
-  return getOrder(shopId, orderId);
+  await getDb()
+    .collection("orders")
+    .doc(cleanOrderId)
+    .update(update);
+
+  return getOrder(cleanShopId, cleanOrderId);
 }
 
-module.exports = { createOrder, getOrder, listOrders, updateOrder };
+module.exports = {
+  createOrder,
+  getOrder,
+  listOrders,
+  updateOrder
+};
