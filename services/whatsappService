@@ -1,1068 +1,627 @@
+const crypto = require("crypto");
+
 const {
   getShop,
   getWhatsAppConfig,
-  saveWhatsAppConfig,
   updateShop
 } = require("./shopService");
 
-const META_GRAPH_VERSION =
-  process.env.META_GRAPH_VERSION || "v23.0";
+const EVOLUTION_API_URL = String(
+  process.env.EVOLUTION_API_URL || ""
+).trim().replace(/\/$/, "");
 
-const META_GRAPH_URL =
-  `https://graph.facebook.com/${META_GRAPH_VERSION}`;
+const EVOLUTION_API_KEY = String(
+  process.env.EVOLUTION_API_KEY || ""
+).trim();
 
-/*
-|--------------------------------------------------------------------------
-| TOKENS META
-|--------------------------------------------------------------------------
-*/
+const EVOLUTION_INTEGRATION = String(
+  process.env.EVOLUTION_INTEGRATION || "WHATSAPP-BAILEYS"
+).trim();
 
-/**
- * Token système Kendra.
- *
- * Il sert principalement à la configuration globale
- * et au fallback du compte de test.
- */
-function getSystemToken() {
-  const token = String(
-    process.env.META_SYSTEM_USER_ACCESS_TOKEN || ""
-  ).trim();
+const WEBHOOK_SECRET = String(
+  process.env.EVOLUTION_WEBHOOK_SECRET || ""
+).trim();
 
-  if (!token) {
-    throw new Error(
-      "META_SYSTEM_USER_ACCESS_TOKEN_MANQUANT"
-    );
+function requireEvolution() {
+  if (!EVOLUTION_API_URL) {
+    throw new Error("EVOLUTION_API_URL_MANQUANT");
+  }
+  if (!EVOLUTION_API_KEY) {
+    throw new Error("EVOLUTION_API_KEY_MANQUANTE");
+  }
+}
+
+function normalizeNumber(value) {
+  return String(value || "")
+    .replace(/[^0-9]/g, "")
+    .trim();
+}
+
+function makeInstanceName(shopId) {
+  const safeShop = String(shopId || "shop")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 24) || "shop";
+  const suffix = crypto.randomBytes(5).toString("hex");
+  return `kendra_${safeShop}_${suffix}`;
+}
+
+function makeInstanceToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function webhookUrl() {
+  const base = String(
+    process.env.KENDRA_PUBLIC_URL ||
+    process.env.BACKEND_PUBLIC_URL ||
+    ""
+  ).trim().replace(/\/$/, "");
+
+  if (!base) {
+    throw new Error("KENDRA_PUBLIC_URL_MANQUANTE");
   }
 
-  return token;
+  const url = `${base}/api/whatsapp/evolution/webhook`;
+  if (!WEBHOOK_SECRET) return url;
+  return `${url}?secret=${encodeURIComponent(WEBHOOK_SECRET)}`;
 }
 
-/**
- * Compatibilité avec l'ancien nom utilisé ailleurs.
- */
-function getMetaToken() {
-  return getSystemToken();
-}
+async function evolutionRequest(path, options = {}, token = EVOLUTION_API_KEY) {
+  requireEvolution();
 
-/**
- * WABA global Kendra.
- *
- * Utilisé uniquement pour le compte de test/fallback.
- */
-function getWabaId() {
-  const wabaId = String(
-    process.env.META_WABA_ID || ""
-  ).trim();
-
-  if (!wabaId) {
-    throw new Error(
-      "META_WABA_ID_MANQUANT"
-    );
-  }
-
-  return wabaId;
-}
-
-/**
- * Phone Number ID global Kendra.
- *
- * Utilisé uniquement pour le compte de test/fallback.
- */
-function getPhoneNumberId() {
-  const phoneNumberId = String(
-    process.env.META_PHONE_NUMBER_ID || ""
-  ).trim();
-
-  if (!phoneNumberId) {
-    throw new Error(
-      "META_PHONE_NUMBER_ID_MANQUANT"
-    );
-  }
-
-  return phoneNumberId;
-}
-
-/*
-|--------------------------------------------------------------------------
-| APPEL GRAPH API
-|--------------------------------------------------------------------------
-*/
-
-async function metaRequest(
-  path,
-  options = {}
-) {
-  const token = getSystemToken();
-
-  return metaRequestWithToken(
-    path,
-    token,
-    options
-  );
-}
-
-async function metaRequestWithToken(
-  path,
-  token,
-  options = {}
-) {
-  if (!token) {
-    throw new Error(
-      "META_ACCESS_TOKEN_MANQUANT"
-    );
-  }
-
-  const url =
-    `${META_GRAPH_URL}${path}`;
-
-  const response = await fetch(
-    url,
-    {
-      ...options,
-
-      headers: {
-        Authorization:
-          `Bearer ${token}`,
-
-        "Content-Type":
-          "application/json",
-
-        ...(options.headers || {})
-      }
+  const url = `${EVOLUTION_API_URL}${path}`;
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      apikey: token,
+      ...(options.headers || {})
     }
-  );
+  });
 
-  const data =
-    await response
-      .json()
-      .catch(() => ({}));
+  const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    console.error(
-      "Erreur Meta Graph API:",
-      JSON.stringify(
-        data,
-        null,
-        2
-      )
-    );
-
-    throw new Error(
-      data?.error?.message ||
-      data?.error?.error_user_msg ||
-      `META_API_ERROR_${response.status}`
-    );
+    const message =
+      data?.response?.message ||
+      data?.message ||
+      data?.error ||
+      `EVOLUTION_API_ERROR_${response.status}`;
+    const error = new Error(String(message));
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
 
   return data;
 }
 
-/*
-|--------------------------------------------------------------------------
-| INFORMATIONS WABA
-|--------------------------------------------------------------------------
-*/
+function extractQr(data) {
+  const candidates = [
+    data?.qrcode?.base64,
+    data?.qrcode?.code,
+    data?.qr?.base64,
+    data?.qr?.code,
+    data?.base64,
+    data?.code,
+    data?.response?.qrcode?.base64,
+    data?.response?.qrcode?.code,
+    data?.data?.qrcode?.base64,
+    data?.data?.qrcode?.code,
+    data?.data?.base64,
+    data?.data?.code
+  ];
 
-async function getWabaInfo() {
-  const wabaId =
-    getWabaId();
-
-  return metaRequest(
-    `/${encodeURIComponent(wabaId)}` +
-    `?fields=id,name`
-  );
+  return candidates.find(v => typeof v === "string" && v.trim()) || "";
 }
 
-/*
-|--------------------------------------------------------------------------
-| INFORMATIONS NUMÉRO WHATSAPP
-|--------------------------------------------------------------------------
-*/
-
-async function getPhoneNumberInfo() {
-  const phoneNumberId =
-    getPhoneNumberId();
-
-  return metaRequest(
-    `/${encodeURIComponent(phoneNumberId)}` +
-    `?fields=id,display_phone_number,verified_name`
-  );
+function extractPairingCode(data) {
+  const candidates = [
+    data?.pairingCode,
+    data?.PairingCode,
+    data?.code,
+    data?.data?.pairingCode,
+    data?.data?.PairingCode,
+    data?.data?.code
+  ];
+  return candidates.find(v => typeof v === "string" && v.trim()) || "";
 }
 
-/*
-|--------------------------------------------------------------------------
-| VÉRIFIER LA CONFIGURATION META GLOBALE
-|--------------------------------------------------------------------------
-*/
+function extractState(data) {
+  return String(
+    data?.instance?.state ||
+    data?.instance?.connectionStatus ||
+    data?.state ||
+    data?.status ||
+    data?.data?.state ||
+    data?.data?.status ||
+    ""
+  ).toLowerCase();
+}
 
-async function verifyMetaConfiguration() {
-  const waba =
-    await getWabaInfo();
+async function createInstance(shopId, shop) {
+  const instanceName = makeInstanceName(shopId);
+  const instanceToken = makeInstanceToken();
+  const hook = webhookUrl();
 
-  const phone =
-    await getPhoneNumberInfo();
+  const body = {
+    instanceName,
+    token: instanceToken,
+    integration: EVOLUTION_INTEGRATION,
+    qrcode: true,
+    webhook: {
+      url: hook,
+      byEvents: false,
+      base64: true,
+      events: [
+        "QRCODE_UPDATED",
+        "CONNECTION_UPDATE",
+        "MESSAGES_UPSERT",
+        "MESSAGES_UPDATE",
+        "SEND_MESSAGE"
+      ]
+    }
+  };
+
+  let data;
+  try {
+    data = await evolutionRequest("/instance/create", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    // Older Evolution API builds may reject the nested webhook/integration fields.
+    data = await evolutionRequest("/instance/create", {
+      method: "POST",
+      body: JSON.stringify({
+        instanceName,
+        token: instanceToken,
+        qrcode: true
+      })
+    });
+  }
+
+  const returnedToken = String(
+    data?.hash?.apikey ||
+    data?.hash?.jwt ||
+    data?.instance?.token ||
+    instanceToken
+  ).trim();
+
+  await configureWebhook(instanceName, returnedToken).catch(() => {});
+
+  await updateShop(shopId, {
+    whatsapp: {
+      ...(shop.whatsapp || {}),
+      connected: false,
+      provider: "evolution",
+      evolutionInstanceName: instanceName,
+      evolutionInstanceToken: returnedToken,
+      connectedAt: null,
+      updatedAt: new Date().toISOString()
+    },
+    whatsappDisplayPhoneNumber: "",
+    whatsappVerifiedName: "",
+    whatsappWabaName: ""
+  });
+
+  return {
+    instanceName,
+    instanceToken: returnedToken,
+    created: true
+  };
+}
+
+async function configureWebhook(instanceName, instanceToken) {
+  const hook = webhookUrl();
+  const payload = {
+    webhook: {
+      enabled: true,
+      url: hook,
+      webhookByEvents: false,
+      webhookBase64: true,
+      events: [
+        "QRCODE_UPDATED",
+        "CONNECTION_UPDATE",
+        "MESSAGES_UPSERT",
+        "MESSAGES_UPDATE",
+        "SEND_MESSAGE"
+      ]
+    }
+  };
+
+  try {
+    return await evolutionRequest(
+      `/webhook/set/${encodeURIComponent(instanceName)}`,
+      { method: "POST", body: JSON.stringify(payload) },
+      instanceToken
+    );
+  } catch (firstError) {
+    // Some versions configure the webhook during /instance/connect instead.
+    return { skipped: true, reason: firstError.message };
+  }
+}
+
+async function getQr(instanceName, instanceToken) {
+  const paths = [
+    `/instance/connect/${encodeURIComponent(instanceName)}`,
+    `/instance/qr/${encodeURIComponent(instanceName)}`
+  ];
+
+  let lastError;
+  for (const path of paths) {
+    try {
+      const data = await evolutionRequest(path, { method: "GET" }, instanceToken);
+      const qr = extractQr(data);
+      if (qr) return { qr, raw: data };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("EVOLUTION_QR_NON_DISPONIBLE");
+}
+
+async function startConnection(instanceName, instanceToken) {
+  const hook = webhookUrl();
+  const body = {
+    webhook: hook,
+    webhookUrl: hook,
+    subscribe: [
+      "QRCODE_UPDATED",
+      "CONNECTION_UPDATE",
+      "MESSAGES_UPSERT",
+      "MESSAGES_UPDATE",
+      "SEND_MESSAGE"
+    ]
+  };
+
+  const paths = [
+    `/instance/connect/${encodeURIComponent(instanceName)}`,
+    `/instance/connect/${encodeURIComponent(instanceName)}?number=`
+  ];
+
+  let lastError;
+  for (const path of paths) {
+    try {
+      const data = await evolutionRequest(path, {
+        method: "POST",
+        body: JSON.stringify(body)
+      }, instanceToken);
+      return data;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("EVOLUTION_CONNECT_FAILED");
+}
+
+async function getState(instanceName, instanceToken) {
+  const paths = [
+    `/instance/connectionState/${encodeURIComponent(instanceName)}`,
+    `/instance/fetchInstances?instanceName=${encodeURIComponent(instanceName)}`
+  ];
+
+  let lastError;
+  for (const path of paths) {
+    try {
+      const data = await evolutionRequest(path, { method: "GET" }, instanceToken);
+      const state = extractState(data);
+      return { state, raw: data };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("EVOLUTION_STATUS_FAILED");
+}
+
+async function connectWhatsApp(shopId, options = {}) {
+  if (!shopId) throw new Error("SHOP_ID_MANQUANT");
+  const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
+
+  let whatsapp = shop.whatsapp || {};
+  let instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  let instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+
+  if (!instanceName || !instanceToken) {
+    const created = await createInstance(shopId, shop);
+    instanceName = created.instanceName;
+    instanceToken = created.instanceToken;
+    whatsapp = (await getShop(shopId)).whatsapp || {};
+  }
+
+  await configureWebhook(instanceName, instanceToken).catch(() => {});
+
+  // Start the session. Evolution API creates the QR asynchronously on some builds.
+  try {
+    await startConnection(instanceName, instanceToken);
+  } catch (error) {
+    const msg = String(error.message || "");
+    if (!/already|open|connected|logged/i.test(msg)) throw error;
+  }
+
+  let qr = "";
+  let qrError = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const result = await getQr(instanceName, instanceToken);
+      qr = result.qr;
+      if (qr) break;
+    } catch (error) {
+      qrError = error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+
+  const state = await getState(instanceName, instanceToken).catch(() => ({ state: "connecting" }));
+  const connected = ["open", "connected", "online"].includes(state.state);
+
+  await updateShop(shopId, {
+    whatsapp: {
+      ...(whatsapp || {}),
+      provider: "evolution",
+      evolutionInstanceName: instanceName,
+      evolutionInstanceToken: instanceToken,
+      connected,
+      updatedAt: new Date().toISOString()
+    }
+  });
 
   return {
     success: true,
+    connected,
+    provider: "evolution",
+    instanceName,
+    phoneNumber: String(options.phoneNumber || shop.whatsappDisplayPhoneNumber || "").trim(),
+    qr: qr || "",
+    qrError: qr ? "" : (qrError?.message || "QR_EN_ATTENTE"),
+    state: state.state || "connecting"
+  };
+}
 
-    waba: {
-      id:
-        waba.id || "",
+async function requestPairingCode(shopId, phone) {
+  const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
 
-      name:
-        waba.name || ""
+  const number = normalizeNumber(phone);
+  if (!number) throw new Error("NUMERO_WHATSAPP_MANQUANT");
+
+  const whatsapp = shop.whatsapp || {};
+  const instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  const instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+  if (!instanceName || !instanceToken) {
+    throw new Error("INSTANCE_EVOLUTION_MANQUANTE");
+  }
+
+  // Evolution API 2.x commonly supports /instance/connect/{instance}?number=...
+  const encoded = encodeURIComponent(instanceName);
+  const attempts = [
+    {
+      path: `/instance/connect/${encoded}?number=${encodeURIComponent(number)}`,
+      method: "GET"
     },
-
-    phone: {
-      id:
-        phone.id || "",
-
-      displayPhoneNumber:
-        phone.display_phone_number || "",
-
-      verifiedName:
-        phone.verified_name || ""
+    {
+      path: `/instance/connect/${encoded}?number=${encodeURIComponent(number)}`,
+      method: "POST",
+      body: JSON.stringify({ number })
+    },
+    {
+      path: `/instance/pair/${encoded}`,
+      method: "POST",
+      body: JSON.stringify({ number, phone: number })
     }
-  };
-}
+  ];
 
-/*
-|--------------------------------------------------------------------------
-| ÉCHANGE DU CODE EMBEDDED SIGNUP
-|--------------------------------------------------------------------------
-|
-| Meta retourne un "code" temporaire au frontend.
-|
-| Le backend échange ce code contre le business
-| access token de la boutique cliente.
-|
-|--------------------------------------------------------------------------
-*/
-
-async function exchangeEmbeddedSignupCode(
-  code
-) {
-  const appId =
-    String(
-      process.env.META_APP_ID || ""
-    ).trim();
-
-  const appSecret =
-    String(
-      process.env.META_APP_SECRET || ""
-    ).trim();
-
-  if (!appId || !appSecret) {
-    throw new Error(
-      "META_APP_CREDENTIALS_MANQUANTS"
-    );
-  }
-
-  if (!code) {
-    throw new Error(
-      "META_EMBEDDED_SIGNUP_CODE_MANQUANT"
-    );
-  }
-
-  const params =
-    new URLSearchParams({
-      client_id:
-        appId,
-
-      client_secret:
-        appSecret,
-
-      code:
-        String(code)
-    });
-
-  const response =
-    await fetch(
-      `${META_GRAPH_URL}/oauth/access_token?${params.toString()}`,
-      {
-        method: "GET"
-      }
-    );
-
-  const data =
-    await response
-      .json()
-      .catch(() => ({}));
-
-  if (
-    !response.ok ||
-    !data.access_token
-  ) {
-    console.error(
-      "META CODE EXCHANGE ERROR:",
-      JSON.stringify(
-        data,
-        null,
-        2
-      )
-    );
-
-    throw new Error(
-      data?.error?.message ||
-      data?.error?.error_user_msg ||
-      "META_EMBEDDED_SIGNUP_CODE_EXCHANGE_FAILED"
-    );
-  }
-
-  return String(
-    data.access_token
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| DÉCOUVERTE AUTOMATIQUE DU WABA APRÈS COEXISTENCE
-|--------------------------------------------------------------------------
-|
-| Le flux WhatsApp Business App Onboarding peut terminer avec un code
-| valide alors que le WABA/Phone Number ID n'est pas présent dans le
-| message reçu par la fenêtre parente. On ne bloque donc plus le
-| commerçant sur ces IDs.
-|
-| Le backend utilise le token issu de l'échange OAuth pour retrouver les
-| WABAs accessibles, puis choisit le numéro fourni par Meta lorsqu'il est
-| disponible. Le token ne quitte jamais le serveur.
-|
-|--------------------------------------------------------------------------
-*/
-
-async function getBusinessesForToken(accessToken) {
-  const data = await metaRequestWithToken(
-    `/me/businesses?fields=id,name&limit=100`,
-    accessToken
-  );
-
-  return Array.isArray(data?.data)
-    ? data.data
-    : [];
-}
-
-async function getClientWabasForBusiness(
-  businessId,
-  accessToken
-) {
-  const data = await metaRequestWithToken(
-    `/${encodeURIComponent(businessId)}/client_whatsapp_business_accounts?fields=id,name,currency,timezone_id&limit=100`,
-    accessToken
-  );
-
-  return Array.isArray(data?.data)
-    ? data.data
-    : [];
-}
-
-async function discoverWabaForToken({
-  accessToken,
-  wabaId = "",
-  phoneNumberId = "",
-  phoneNumber = ""
-}) {
-  let cleanWabaId = String(wabaId || "").trim();
-  let cleanPhoneNumberId = String(phoneNumberId || "").trim();
-  const cleanPhoneNumber = String(phoneNumber || "").replace(/[^0-9+]/g, "");
-
-  if (cleanWabaId) {
-    return {
-      wabaId: cleanWabaId,
-      phoneNumberId: cleanPhoneNumberId
-    };
-  }
-
-  const businesses = await getBusinessesForToken(accessToken);
-
-  for (const business of businesses) {
-    if (!business?.id) continue;
-
-    let wabas = [];
-
+  let lastError;
+  for (const attempt of attempts) {
     try {
-      wabas = await getClientWabasForBusiness(
-        business.id,
-        accessToken
-      );
-    } catch (error) {
-      console.warn(
-        "Impossible de récupérer les WABAs du business Meta:",
-        business.id,
-        error.message
-      );
-      continue;
-    }
-
-    for (const waba of wabas) {
-      if (!waba?.id) continue;
-
-      const numbers = await getWabaPhoneNumbers(
-        String(waba.id),
-        accessToken
-      );
-
-      const list = Array.isArray(numbers?.data)
-        ? numbers.data
-        : [];
-
-      if (cleanPhoneNumberId) {
-        const match = list.find(
-          item => String(item?.id || "") === cleanPhoneNumberId
-        );
-
-        if (match) {
-          cleanWabaId = String(waba.id);
-          return {
-            wabaId: cleanWabaId,
-            phoneNumberId: cleanPhoneNumberId
-          };
-        }
-      }
-
-      if (cleanPhoneNumber) {
-        const match = list.find(item => {
-          const candidate = String(
-            item?.display_phone_number || ""
-          ).replace(/[^0-9+]/g, "");
-
-          return candidate === cleanPhoneNumber;
+      const data = await evolutionRequest(attempt.path, {
+        method: attempt.method,
+        body: attempt.body
+      }, instanceToken);
+      const code = extractPairingCode(data);
+      if (code) {
+        await updateShop(shopId, {
+          whatsappDisplayPhoneNumber: number,
+          whatsapp: {
+            ...whatsapp,
+            provider: "evolution",
+            evolutionPhoneNumber: number,
+            updatedAt: new Date().toISOString()
+          }
         });
-
-        if (match?.id) {
-          cleanWabaId = String(waba.id);
-          return {
-            wabaId: cleanWabaId,
-            phoneNumberId: String(match.id)
-          };
-        }
+        return { success: true, pairingCode: code };
       }
-
-      /*
-       * Coexistence est généralement un onboarding d'un numéro unique.
-       * Si aucun numéro n'a été fourni par la session, utiliser le premier
-       * numéro accessible dans le WABA trouvé.
-       */
-      if (!cleanPhoneNumberId && !cleanPhoneNumber && list[0]?.id) {
-        cleanWabaId = String(waba.id);
-        return {
-          wabaId: cleanWabaId,
-          phoneNumberId: String(list[0].id)
-        };
-      }
+    } catch (error) {
+      lastError = error;
     }
   }
 
-  return {
-    wabaId: "",
-    phoneNumberId: cleanPhoneNumberId
-  };
+  throw lastError || new Error("EVOLUTION_PAIRING_CODE_NON_DISPONIBLE");
 }
 
-/*
-|--------------------------------------------------------------------------
-| NUMÉROS D'UN WABA
-|--------------------------------------------------------------------------
-*/
+async function getConnectionStatus(shopId) {
+  const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
 
-async function getWabaPhoneNumbers(
-  wabaId,
-  accessToken
-) {
-  if (!wabaId) {
-    throw new Error(
-      "META_WABA_ID_MANQUANT"
-    );
-  }
+  const whatsapp = shop.whatsapp || {};
+  const instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  const instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
 
-  return metaRequestWithToken(
-    `/${encodeURIComponent(wabaId)}` +
-    `/phone_numbers` +
-    `?fields=id,display_phone_number,verified_name`,
-    accessToken
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| SOUSCRIPTION DU WABA AUX WEBHOOKS
-|--------------------------------------------------------------------------
-*/
-
-async function subscribeAppToWaba(
-  wabaId,
-  accessToken
-) {
-  if (!wabaId) {
-    throw new Error(
-      "META_WABA_ID_MANQUANT"
-    );
-  }
-
-  return metaRequestWithToken(
-    `/${encodeURIComponent(wabaId)}` +
-    `/subscribed_apps`,
-    accessToken,
-    {
-      method: "POST"
-    }
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| CONNEXION WHATSAPP
-|--------------------------------------------------------------------------
-|
-| Deux modes :
-|
-| 1. EMBEDDED SIGNUP
-|    - code
-|    - wabaId
-|    - phoneNumberId
-|
-| 2. FALLBACK TEST
-|    - variables Render
-|
-|--------------------------------------------------------------------------
-*/
-
-async function connectWhatsApp(
-  shopId,
-  options = {}
-) {
-  if (!shopId) {
-    throw new Error(
-      "SHOP_ID_MANQUANT"
-    );
-  }
-
-  const shop =
-    await getShop(shopId);
-
-  if (!shop) {
-    throw new Error(
-      "BOUTIQUE_NOT_FOUND"
-    );
-  }
-
-  const code =
-    String(
-      options.code || ""
-    ).trim();
-
-  let accessToken =
-    "";
-
-  let wabaId =
-    String(
-      options.wabaId || ""
-    ).trim();
-
-  let phoneNumberId =
-    String(
-      options.phoneNumberId || ""
-    ).trim();
-
-  /*
-   * ---------------------------------------------------------------
-   * MODE EMBEDDED SIGNUP
-   * ---------------------------------------------------------------
-   */
-
-  if (code) {
-    accessToken =
-      await exchangeEmbeddedSignupCode(
-        code
-      );
-  }
-
-  /*
-   * ---------------------------------------------------------------
-   * MODE TEST / FALLBACK
-   * ---------------------------------------------------------------
-   */
-
-  else {
-    accessToken =
-      getSystemToken();
-
-    wabaId =
-      wabaId ||
-      getWabaId();
-
-    phoneNumberId =
-      phoneNumberId ||
-      getPhoneNumberId();
-  }
-
-  /*
-   * ---------------------------------------------------------------
-   * DÉCOUVERTE AUTOMATIQUE DES ASSETS
-   * ---------------------------------------------------------------
-   *
-   * En mode Coexistence, les IDs peuvent arriver dans le message de
-   * session ou ne pas être transmis au parent. Le backend tente donc
-   * de les résoudre à partir du token OAuth avant toute vérification.
-   */
-
-  const discovered =
-    await discoverWabaForToken({
-      accessToken,
-      wabaId,
-      phoneNumberId,
-      phoneNumber: options.phoneNumber || ""
-    });
-
-  wabaId =
-    String(discovered.wabaId || "").trim();
-
-  phoneNumberId =
-    String(discovered.phoneNumberId || "").trim();
-
-  if (!wabaId) {
-    throw new Error(
-      "META_WABA_ID_NON_RECUPERE_APRES_ONBOARDING"
-    );
-  }
-
-  if (!phoneNumberId) {
-    const numbers =
-      await getWabaPhoneNumbers(
-        wabaId,
-        accessToken
-      );
-
-    const first =
-      Array.isArray(numbers.data)
-        ? numbers.data[0]
-        : null;
-
-    if (!first?.id) {
-      throw new Error(
-        "META_PHONE_NUMBER_ID_NON_RECUPERE_APRES_ONBOARDING"
-      );
-    }
-
-    phoneNumberId = String(first.id);
-  }
-
-  /*
-   * ---------------------------------------------------------------
-   * VÉRIFICATION DU WABA
-   * ---------------------------------------------------------------
-   */
-
-  const waba =
-    await metaRequestWithToken(
-      `/${encodeURIComponent(wabaId)}` +
-      `?fields=id,name`,
-      accessToken
-    );
-
-  if (
-    String(waba.id) !==
-    String(wabaId)
-  ) {
-    throw new Error(
-      "META_WABA_ID_INCORRECT"
-    );
-  }
-
-  /*
-   * ---------------------------------------------------------------
-   * VÉRIFICATION DU NUMÉRO
-   * ---------------------------------------------------------------
-   */
-
-  const phone =
-    await metaRequestWithToken(
-      `/${encodeURIComponent(phoneNumberId)}` +
-      `?fields=id,display_phone_number,verified_name`,
-      accessToken
-    );
-
-  if (
-    String(phone.id) !==
-    String(phoneNumberId)
-  ) {
-    throw new Error(
-      "META_PHONE_NUMBER_ID_INCORRECT"
-    );
-  }
-
-  /*
-   * ---------------------------------------------------------------
-   * ABONNEMENT DU WABA AUX WEBHOOKS
-   * ---------------------------------------------------------------
-   */
-
-  await subscribeAppToWaba(
-    wabaId,
-    accessToken
-  );
-
-  /*
-   * ---------------------------------------------------------------
-   * SAUVEGARDE FIRESTORE
-   * ---------------------------------------------------------------
-   */
-
-  await saveWhatsAppConfig(
-    shopId,
-    {
-      phoneNumberId:
-        phoneNumberId,
-
-      wabaId:
-        wabaId,
-
-      accessToken:
-        accessToken,
-
-      connected:
-        true
-    }
-  );
-
-  /*
-   * ---------------------------------------------------------------
-   * MISE À JOUR DE LA BOUTIQUE
-   * ---------------------------------------------------------------
-   */
-
-  await updateShop(
-    shopId,
-    {
-      whatsappDisplayPhoneNumber:
-        phone.display_phone_number ||
-        options.phoneNumber ||
-        "",
-
-      whatsappVerifiedName:
-        phone.verified_name ||
-        "",
-
-      whatsappWabaName:
-        waba.name ||
-        ""
-    }
-  );
-
-  /*
-   * ---------------------------------------------------------------
-   * RÉSULTAT
-   * ---------------------------------------------------------------
-   */
-
-  return {
-    success:
-      true,
-
-    connected:
-      true,
-
-    wabaId:
-      wabaId,
-
-    phoneNumberId:
-      phoneNumberId,
-
-    phoneNumber:
-      phone.display_phone_number ||
-      options.phoneNumber ||
-      "",
-
-    verifiedName:
-      phone.verified_name ||
-      ""
-  };
-}
-
-/*
-|--------------------------------------------------------------------------
-| STATUT WHATSAPP
-|--------------------------------------------------------------------------
-*/
-
-async function getConnectionStatus(
-  shopId
-) {
-  const shop =
-    await getShop(shopId);
-
-  if (!shop) {
-    throw new Error(
-      "BOUTIQUE_NOT_FOUND"
-    );
-  }
-
-  const whatsapp =
-    shop.whatsapp;
-
-  if (
-    !whatsapp ||
-    !whatsapp.connected
-  ) {
+  if (!instanceName || !instanceToken) {
     return {
-      connected:
-        false,
-
-      phoneNumber:
-        "",
-
-      phoneNumberId:
-        "",
-
-      wabaId:
-        "",
-
-      verifiedName:
-        ""
+      connected: false,
+      provider: "evolution",
+      phoneNumber: "",
+      instanceName: ""
     };
   }
 
-  return {
-    connected:
-      true,
+  const result = await getState(instanceName, instanceToken).catch(() => ({ state: "" }));
+  const state = String(result.state || "").toLowerCase();
+  const connected = ["open", "connected", "online"].includes(state);
 
+  if (connected !== Boolean(whatsapp.connected)) {
+    await updateShop(shopId, {
+      whatsapp: {
+        ...whatsapp,
+        provider: "evolution",
+        connected,
+        updatedAt: new Date().toISOString()
+      }
+    });
+  }
+
+  return {
+    connected,
+    provider: "evolution",
+    state,
     phoneNumber:
       shop.whatsappDisplayPhoneNumber ||
+      whatsapp.evolutionPhoneNumber ||
       "",
-
-    phoneNumberId:
-      whatsapp.phoneNumberId ||
-      "",
-
-    wabaId:
-      whatsapp.wabaId ||
-      "",
-
-    verifiedName:
-      shop.whatsappVerifiedName ||
-      ""
+    instanceName
   };
 }
 
-/*
-|--------------------------------------------------------------------------
-| DÉCONNECTER WHATSAPP
-|--------------------------------------------------------------------------
-*/
+async function disconnectWhatsApp(shopId) {
+  const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
 
-async function disconnectWhatsApp(
-  shopId
-) {
-  const shop =
-    await getShop(shopId);
+  const whatsapp = shop.whatsapp || {};
+  const instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  const instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
 
-  if (!shop) {
-    throw new Error(
-      "BOUTIQUE_NOT_FOUND"
-    );
+  if (instanceName && instanceToken) {
+    try {
+      await evolutionRequest(
+        `/instance/logout/${encodeURIComponent(instanceName)}`,
+        { method: "DELETE" },
+        instanceToken
+      );
+    } catch (error) {
+      console.warn("Evolution logout:", error.message);
+    }
   }
 
-  /*
-   * On retire uniquement la connexion
-   * de cette boutique.
-   *
-   * Le token global Render reste intact.
-   */
+  await updateShop(shopId, {
+    whatsapp: {
+      provider: "evolution",
+      evolutionInstanceName: "",
+      evolutionInstanceToken: "",
+      evolutionPhoneNumber: "",
+      connected: false,
+      disconnectedAt: new Date().toISOString()
+    },
+    whatsappDisplayPhoneNumber: "",
+    whatsappVerifiedName: "",
+    whatsappWabaName: ""
+  });
 
-  await updateShop(
-    shopId,
-    {
-      whatsapp: {
-        phoneNumberId:
-          "",
+  return { success: true, connected: false };
+}
 
-        wabaId:
-          "",
+async function sendMessage({ shopId, to, text }) {
+  if (!shopId) throw new Error("shopId est obligatoire");
+  if (!to) throw new Error("Destinataire WhatsApp manquant");
+  if (!text) throw new Error("Message vide");
 
-        accessToken:
-          "",
+  const shop = await getShop(shopId);
+  if (!shop) throw new Error("BOUTIQUE_NOT_FOUND");
 
-        connected:
-          false,
+  const whatsapp = shop.whatsapp || {};
+  const instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  const instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+  if (!instanceName || !instanceToken) {
+    throw new Error("WHATSAPP_EVOLUTION_NON_CONNECTE");
+  }
 
-        disconnectedAt:
-          new Date().toISOString()
-      },
+  const number = normalizeNumber(to);
+  const body = JSON.stringify({
+    number,
+    text: String(text),
+    delay: 0,
+    linkPreview: false
+  });
 
-      whatsappDisplayPhoneNumber:
-        "",
+  const paths = [
+    `/message/sendText/${encodeURIComponent(instanceName)}`,
+    `/send/text/${encodeURIComponent(instanceName)}`
+  ];
 
-      whatsappVerifiedName:
-        "",
-
-      whatsappWabaName:
-        ""
+  let lastError;
+  for (const path of paths) {
+    try {
+      return await evolutionRequest(path, {
+        method: "POST",
+        body
+      }, instanceToken);
+    } catch (error) {
+      lastError = error;
     }
+  }
+
+  throw lastError || new Error("WHATSAPP_SEND_FAILED");
+}
+
+function normalizeEvolutionWebhook(body) {
+  const event = String(body?.event || body?.type || "").toUpperCase();
+  const instance = String(
+    body?.instance ||
+    body?.instanceName ||
+    body?.data?.instance ||
+    ""
+  ).trim();
+  const data = body?.data || body;
+
+  const message =
+    data?.message ||
+    data?.messages?.[0] ||
+    data?.Message ||
+    null;
+
+  const key =
+    data?.key ||
+    data?.Key ||
+    data?.Info ||
+    message?.key ||
+    message?.Key ||
+    {};
+
+  const remoteJid = String(
+    key?.remoteJid ||
+    key?.RemoteJid ||
+    data?.remoteJid ||
+    data?.sender ||
+    ""
+  ).trim();
+
+  const fromMe = Boolean(
+    key?.fromMe ??
+    key?.FromMe ??
+    data?.fromMe
   );
 
-  return {
-    success:
-      true,
+  const text = String(
+    message?.conversation ||
+    message?.extendedTextMessage?.text ||
+    message?.extendedTextMessage?.Text ||
+    data?.text ||
+    data?.body ||
+    ""
+  ).trim();
 
-    connected:
-      false
-  };
+  return { event, instance, remoteJid, fromMe, text };
 }
-
-/*
-|--------------------------------------------------------------------------
-| ENVOYER UN MESSAGE WHATSAPP
-|--------------------------------------------------------------------------
-*/
-
-async function sendMessage({
-  shopId,
-  to,
-  text
-}) {
-  if (!shopId) {
-    throw new Error(
-      "shopId est obligatoire"
-    );
-  }
-
-  if (!to) {
-    throw new Error(
-      "Destinataire WhatsApp manquant"
-    );
-  }
-
-  if (!text) {
-    throw new Error(
-      "Message vide"
-    );
-  }
-
-  /*
-   * Configuration propre à la boutique.
-   */
-
-  const config =
-    await getWhatsAppConfig(
-      shopId
-    );
-
-  /*
-   * Priorité absolue :
-   *
-   * 1. token de la boutique
-   * 2. token système Kendra
-   */
-
-  const token =
-    config?.accessToken ||
-    getSystemToken();
-
-  /*
-   * Priorité :
-   *
-   * 1. Phone Number ID de la boutique
-   * 2. Phone Number ID global de test
-   */
-
-  const phoneNumberId =
-    config?.phoneNumberId ||
-    getPhoneNumberId();
-
-  if (!phoneNumberId) {
-    throw new Error(
-      "WHATSAPP_PHONE_NUMBER_ID_MISSING"
-    );
-  }
-
-  if (!token) {
-    throw new Error(
-      "WHATSAPP_ACCESS_TOKEN_MISSING"
-    );
-  }
-
-  const url =
-    `${META_GRAPH_URL}/` +
-    `${encodeURIComponent(phoneNumberId)}` +
-    `/messages`;
-
-  const response =
-    await fetch(
-      url,
-      {
-        method:
-          "POST",
-
-        headers: {
-          Authorization:
-            `Bearer ${token}`,
-
-          "Content-Type":
-            "application/json"
-        },
-
-        body:
-          JSON.stringify({
-            messaging_product:
-              "whatsapp",
-
-            recipient_type:
-              "individual",
-
-            to:
-              String(to),
-
-            type:
-              "text",
-
-            text: {
-              preview_url:
-                false,
-
-              body:
-                String(text)
-            }
-          })
-      }
-    );
-
-  const data =
-    await response
-      .json()
-      .catch(() => ({}));
-
-  if (!response.ok) {
-    console.error(
-      "Erreur envoi WhatsApp:",
-      JSON.stringify(
-        data,
-        null,
-        2
-      )
-    );
-
-    throw new Error(
-      data?.error?.message ||
-      data?.error?.error_user_msg ||
-      "WHATSAPP_SEND_FAILED"
-    );
-  }
-
-  return data;
-}
-
-/*
-|--------------------------------------------------------------------------
-| EXPORTS
-|--------------------------------------------------------------------------
-*/
 
 module.exports = {
-  getWabaInfo,
-  getPhoneNumberInfo,
-  verifyMetaConfiguration,
   connectWhatsApp,
+  requestPairingCode,
   getConnectionStatus,
   disconnectWhatsApp,
-  sendMessage
+  sendMessage,
+  normalizeEvolutionWebhook
 };
