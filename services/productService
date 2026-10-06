@@ -2,76 +2,303 @@ const { getDb, timestamp } = require("../config/firebase");
 const subscriptionService = require("./subscriptionService");
 
 const productsRef = (shopId) =>
-  getDb().collection("products").where("shopId", "==", String(shopId));
+  getDb()
+    .collection("products")
+    .where(
+      "shopId",
+      "==",
+      String(shopId)
+    );
 
-async function createProduct(shopId, data) {
-  if (!shopId) throw new Error("shopId est obligatoire");
-  if (!data.name) throw new Error("Le nom du produit est obligatoire");
-  if (data.price === undefined || Number(data.price) < 0) {
-    throw new Error("Le prix du produit est invalide");
+/*
+|--------------------------------------------------------------------------
+| CRÉER UN PRODUIT
+|--------------------------------------------------------------------------
+*/
+
+async function createProduct(
+  shopId,
+  data = {}
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  const db = getDb();
-  const limitCheck = await subscriptionService.canUse(shopId, "products", 1);
-  if (!limitCheck.allowed) throw new Error(limitCheck.reason);
-  const ref = db.collection("products").doc();
+  const name =
+    String(
+      data.name || ""
+    ).trim();
+
+  if (!name) {
+    throw new Error(
+      "Le nom du produit est obligatoire"
+    );
+  }
+
+  const price =
+    Number(data.price);
+
+  if (
+    data.price === undefined ||
+    !Number.isFinite(price) ||
+    price < 0
+  ) {
+    throw new Error(
+      "Le prix du produit est invalide"
+    );
+  }
+
+  const stock =
+    Number(
+      data.stock === undefined
+        ? 0
+        : data.stock
+    );
+
+  if (
+    !Number.isFinite(stock) ||
+    stock < 0
+  ) {
+    throw new Error(
+      "Le stock du produit est invalide"
+    );
+  }
+
+  const db =
+    getDb();
+
+  /*
+   * Vérification de la limite du plan.
+   */
+  const limitCheck =
+    await subscriptionService.canUse(
+      shopId,
+      "products",
+      1
+    );
+
+  if (!limitCheck.allowed) {
+    throw new Error(
+      limitCheck.reason
+    );
+  }
+
+  const ref =
+    db
+      .collection("products")
+      .doc();
 
   const product = {
-    id: ref.id,
-    shopId: String(shopId),
-    name: String(data.name).trim(),
-    description: String(data.description || "").trim(),
-    price: Number(data.price),
-    stock: Math.max(0, Number(data.stock || 0)),
-    category: String(data.category || "").trim(),
-    imageUrl: String(data.imageUrl || "").trim(),
-    active: data.active !== false,
-    createdAt: timestamp(),
-    updatedAt: timestamp()
+    id:
+      ref.id,
+
+    shopId:
+      String(shopId),
+
+    name,
+
+    description:
+      String(
+        data.description || ""
+      ).trim(),
+
+    price,
+
+    stock:
+      Math.max(
+        0,
+        Math.floor(stock)
+      ),
+
+    category:
+      String(
+        data.category || ""
+      ).trim(),
+
+    imageUrl:
+      String(
+        data.imageUrl || ""
+      ).trim(),
+
+    active:
+      data.active !== false,
+
+    createdAt:
+      timestamp(),
+
+    updatedAt:
+      timestamp()
   };
 
-  await ref.set(product);
+  await ref.set(
+    product
+  );
 
-  const usageRef = db.collection("usage").doc(String(shopId));
-  await usageRef.set({
-    products: require("firebase-admin").firestore.FieldValue.increment(1),
-    updatedAt: timestamp()
-  }, { merge: true });
+  await db
+    .collection("usage")
+    .doc(String(shopId))
+    .set(
+      {
+        products:
+          require("firebase-admin")
+            .firestore
+            .FieldValue
+            .increment(1),
+
+        updatedAt:
+          timestamp()
+      },
+      {
+        merge: true
+      }
+    );
 
   return product;
 }
 
-async function getProduct(shopId, productId) {
-  const snap = await getDb().collection("products").doc(productId).get();
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER UN PRODUIT
+|--------------------------------------------------------------------------
+*/
 
-  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
-
-  return { id: snap.id, ...snap.data() };
-}
-
-async function listProducts(shopId, options = {}) {
-  const snap = await productsRef(shopId).get();
-  let products = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-
-  if (options.activeOnly === true) {
-    products = products.filter(product => product.active === true);
+async function getProduct(
+  shopId,
+  productId
+) {
+  if (
+    !shopId ||
+    !productId
+  ) {
+    return null;
   }
 
-  if (options.category) {
-    products = products.filter(
-      product => product.category.toLowerCase() === String(options.category).toLowerCase()
+  const snap =
+    await getDb()
+      .collection("products")
+      .doc(String(productId))
+      .get();
+
+  if (!snap.exists) {
+    return null;
+  }
+
+  const data =
+    snap.data();
+
+  if (
+    String(data.shopId) !==
+    String(shopId)
+  ) {
+    return null;
+  }
+
+  return {
+    id:
+      snap.id,
+
+    ...data
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| LISTE DES PRODUITS
+|--------------------------------------------------------------------------
+*/
+
+async function listProducts(
+  shopId,
+  options = {}
+) {
+  if (!shopId) {
+    return [];
+  }
+
+  const snap =
+    await productsRef(
+      shopId
+    ).get();
+
+  let products =
+    snap.docs.map(
+      doc => ({
+        id:
+          doc.id,
+
+        ...doc.data()
+      })
     );
+
+  /*
+   * Seulement les produits actifs.
+   */
+  if (
+    options.activeOnly === true
+  ) {
+    products =
+      products.filter(
+        product =>
+          product.active === true
+      );
+  }
+
+  /*
+   * Filtre catégorie.
+   */
+  if (
+    options.category
+  ) {
+    const category =
+      String(
+        options.category
+      )
+        .trim()
+        .toLowerCase();
+
+    products =
+      products.filter(
+        product =>
+          String(
+            product.category || ""
+          )
+            .toLowerCase() ===
+          category
+      );
   }
 
   return products;
 }
 
+/*
+|--------------------------------------------------------------------------
+| UPLOAD IMAGE CLOUDINARY
+|--------------------------------------------------------------------------
+*/
 
+async function uploadProductImage(
+  shopId,
+  dataUrl,
+  fileName = "product"
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
 
-async function uploadProductImage(shopId, dataUrl, fileName = "product") {
-  if (!shopId) throw new Error("shopId est obligatoire");
+  if (!dataUrl) {
+    throw new Error(
+      "Image manquante"
+    );
+  }
 
-  const cloudinary = require("./cloudinaryService");
+  const cloudinary =
+    require(
+      "./cloudinaryService"
+    );
 
   return cloudinary.uploadImage({
     dataUrl,
@@ -80,58 +307,247 @@ async function uploadProductImage(shopId, dataUrl, fileName = "product") {
   });
 }
 
-async function updateProduct(shopId, productId, data) {
-  const product = await getProduct(shopId, productId);
-  if (!product) return null;
+/*
+|--------------------------------------------------------------------------
+| MODIFIER UN PRODUIT
+|--------------------------------------------------------------------------
+*/
+
+async function updateProduct(
+  shopId,
+  productId,
+  data = {}
+) {
+  const product =
+    await getProduct(
+      shopId,
+      productId
+    );
+
+  if (!product) {
+    return null;
+  }
 
   const allowed = [
-    "name", "description", "price", "stock",
-    "category", "imageUrl", "active"
+    "name",
+    "description",
+    "price",
+    "stock",
+    "category",
+    "imageUrl",
+    "active"
   ];
 
   const update = {};
-  for (const key of allowed) {
-    if (data[key] !== undefined) update[key] = data[key];
+
+  for (
+    const key of allowed
+  ) {
+    if (
+      data[key] !==
+      undefined
+    ) {
+      update[key] =
+        data[key];
+    }
   }
 
-  if (update.price !== undefined) {
-    update.price = Number(update.price);
-    if (update.price < 0) throw new Error("Le prix est invalide");
+  /*
+   * Prix.
+   */
+  if (
+    update.price !==
+    undefined
+  ) {
+    update.price =
+      Number(
+        update.price
+      );
+
+    if (
+      !Number.isFinite(
+        update.price
+      ) ||
+      update.price < 0
+    ) {
+      throw new Error(
+        "Le prix est invalide"
+      );
+    }
   }
 
-  if (update.stock !== undefined) {
-    update.stock = Math.max(0, Number(update.stock));
+  /*
+   * Stock.
+   */
+  if (
+    update.stock !==
+    undefined
+  ) {
+    update.stock =
+      Number(
+        update.stock
+      );
+
+    if (
+      !Number.isFinite(
+        update.stock
+      ) ||
+      update.stock < 0
+    ) {
+      throw new Error(
+        "Le stock est invalide"
+      );
+    }
+
+    update.stock =
+      Math.floor(
+        update.stock
+      );
   }
 
-  if (update.name !== undefined) {
-    update.name = String(update.name).trim();
+  /*
+   * Texte.
+   */
+  if (
+    update.name !==
+    undefined
+  ) {
+    update.name =
+      String(
+        update.name
+      ).trim();
+
+    if (!update.name) {
+      throw new Error(
+        "Le nom du produit est obligatoire"
+      );
+    }
   }
 
-  update.updatedAt = timestamp();
+  if (
+    update.description !==
+    undefined
+  ) {
+    update.description =
+      String(
+        update.description
+      ).trim();
+  }
 
-  await getDb().collection("products").doc(productId).update(update);
+  if (
+    update.category !==
+    undefined
+  ) {
+    update.category =
+      String(
+        update.category
+      ).trim();
+  }
 
-  return getProduct(shopId, productId);
+  if (
+    update.imageUrl !==
+    undefined
+  ) {
+    update.imageUrl =
+      String(
+        update.imageUrl
+      ).trim();
+  }
+
+  update.updatedAt =
+    timestamp();
+
+  await getDb()
+    .collection("products")
+    .doc(String(productId))
+    .update(update);
+
+  return getProduct(
+    shopId,
+    productId
+  );
 }
 
-async function deleteProduct(shopId, productId) {
-  const product = await getProduct(shopId, productId);
-  if (!product) return false;
+/*
+|--------------------------------------------------------------------------
+| SUPPRIMER UN PRODUIT
+|--------------------------------------------------------------------------
+*/
 
-  await getDb().collection("products").doc(productId).delete();
+async function deleteProduct(
+  shopId,
+  productId
+) {
+  const product =
+    await getProduct(
+      shopId,
+      productId
+    );
 
-  const admin = require("firebase-admin");
-  await getDb().collection("usage").doc(String(shopId)).set({
-    products: admin.firestore.FieldValue.increment(-1),
-    updatedAt: timestamp()
-  }, { merge: true });
+  if (!product) {
+    return false;
+  }
+
+  const db =
+    getDb();
+
+  await db
+    .collection("products")
+    .doc(String(productId))
+    .delete();
+
+  /*
+   * Décrémenter le compteur.
+   */
+  const admin =
+    require("firebase-admin");
+
+  await db
+    .collection("usage")
+    .doc(String(shopId))
+    .set(
+      {
+        products:
+          admin.firestore
+            .FieldValue
+            .increment(-1),
+
+        updatedAt:
+          timestamp()
+      },
+      {
+        merge: true
+      }
+    );
 
   return true;
 }
 
-async function updateStock(shopId, productId, stock) {
-  return updateProduct(shopId, productId, { stock });
+/*
+|--------------------------------------------------------------------------
+| METTRE À JOUR LE STOCK
+|--------------------------------------------------------------------------
+*/
+
+async function updateStock(
+  shopId,
+  productId,
+  stock
+) {
+  return updateProduct(
+    shopId,
+    productId,
+    {
+      stock
+    }
+  );
 }
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
 
 module.exports = {
   createProduct,
