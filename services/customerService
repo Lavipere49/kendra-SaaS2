@@ -1,78 +1,417 @@
 const { getDb, timestamp } = require("../config/firebase");
 
-const customersRef = (shopId) =>
-  getDb().collection("customers").where("shopId", "==", String(shopId));
+const customersCollection = () =>
+  getDb().collection("customers");
 
-async function createCustomer(shopId, data) {
-  if (!shopId) throw new Error("shopId est obligatoire");
-  if (!data.phone && !data.whatsapp) {
-    throw new Error("phone ou whatsapp est obligatoire");
+const customersRef = (shopId) =>
+  customersCollection().where(
+    "shopId",
+    "==",
+    String(shopId)
+  );
+
+/*
+|--------------------------------------------------------------------------
+| CRÉER UN CLIENT
+|--------------------------------------------------------------------------
+*/
+
+async function createCustomer(
+  shopId,
+  data = {}
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  const db = getDb();
-  const ref = db.collection("customers").doc();
+  const phone =
+    String(
+      data.phone || ""
+    ).trim();
+
+  const whatsapp =
+    String(
+      data.whatsapp ||
+      phone ||
+      ""
+    ).trim();
+
+  if (!phone && !whatsapp) {
+    throw new Error(
+      "phone ou whatsapp est obligatoire"
+    );
+  }
+
+  const db =
+    getDb();
+
+  const ref =
+    db.collection("customers").doc();
 
   const customer = {
-    id: ref.id,
-    shopId: String(shopId),
-    name: String(data.name || "").trim(),
-    phone: String(data.phone || "").trim(),
-    whatsapp: String(data.whatsapp || data.phone || "").trim(),
-    email: String(data.email || "").trim(),
-    address: String(data.address || "").trim(),
-    notes: String(data.notes || "").trim(),
-    totalOrders: 0,
-    totalSpent: 0,
-    lastContactAt: timestamp(),
-    createdAt: timestamp(),
-    updatedAt: timestamp()
+    id:
+      ref.id,
+
+    shopId:
+      String(shopId),
+
+    name:
+      String(
+        data.name || ""
+      ).trim(),
+
+    phone,
+
+    whatsapp,
+
+    email:
+      String(
+        data.email || ""
+      ).trim(),
+
+    address:
+      String(
+        data.address || ""
+      ).trim(),
+
+    notes:
+      String(
+        data.notes || ""
+      ).trim(),
+
+    totalOrders:
+      0,
+
+    totalSpent:
+      0,
+
+    lastContactAt:
+      timestamp(),
+
+    createdAt:
+      timestamp(),
+
+    updatedAt:
+      timestamp()
   };
 
-  await ref.set(customer);
+  await ref.set(
+    customer
+  );
 
-  await db.collection("usage").doc(String(shopId)).set({
-    customers: require("firebase-admin").firestore.FieldValue.increment(1),
-    updatedAt: timestamp()
-  }, { merge: true });
+  /*
+   * Comptabiliser le nouveau client.
+   */
+  await db
+    .collection("usage")
+    .doc(String(shopId))
+    .set(
+      {
+        customers:
+          require("firebase-admin")
+            .firestore
+            .FieldValue
+            .increment(1),
+
+        updatedAt:
+          timestamp()
+      },
+      {
+        merge: true
+      }
+    );
 
   return customer;
 }
 
-async function getCustomer(shopId, customerId) {
-  const snap = await getDb().collection("customers").doc(customerId).get();
-  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
-  return { id: snap.id, ...snap.data() };
-}
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER UN CLIENT
+|--------------------------------------------------------------------------
+*/
 
-async function listCustomers(shopId) {
-  const snap = await customersRef(shopId).get();
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-}
-
-async function findByWhatsApp(shopId, whatsapp) {
-  const customers = await listCustomers(shopId);
-  return customers.find(c => c.whatsapp === String(whatsapp)) || null;
-}
-
-async function updateCustomer(shopId, customerId, data) {
-  const customer = await getCustomer(shopId, customerId);
-  if (!customer) return null;
-
-  const allowed = ["name","phone","whatsapp","email","address","notes"];
-  const update = {};
-  for (const key of allowed) {
-    if (data[key] !== undefined) update[key] = String(data[key]).trim();
+async function getCustomer(
+  shopId,
+  customerId
+) {
+  if (
+    !shopId ||
+    !customerId
+  ) {
+    return null;
   }
-  update.updatedAt = timestamp();
 
-  await getDb().collection("customers").doc(customerId).update(update);
-  return getCustomer(shopId, customerId);
+  const snap =
+    await customersCollection()
+      .doc(String(customerId))
+      .get();
+
+  if (!snap.exists) {
+    return null;
+  }
+
+  const data =
+    snap.data();
+
+  /*
+   * Sécurité :
+   * un commerçant ne peut pas récupérer
+   * le client d'une autre boutique.
+   */
+  if (
+    String(data.shopId) !==
+    String(shopId)
+  ) {
+    return null;
+  }
+
+  return {
+    id:
+      snap.id,
+
+    ...data
+  };
 }
+
+/*
+|--------------------------------------------------------------------------
+| LISTE DES CLIENTS
+|--------------------------------------------------------------------------
+*/
+
+async function listCustomers(
+  shopId
+) {
+  if (!shopId) {
+    return [];
+  }
+
+  const snap =
+    await customersRef(
+      shopId
+    ).get();
+
+  return snap.docs.map(
+    doc => ({
+      id:
+        doc.id,
+
+      ...doc.data()
+    })
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| RECHERCHE PAR WHATSAPP
+|--------------------------------------------------------------------------
+*/
+
+async function findByWhatsApp(
+  shopId,
+  whatsapp
+) {
+  if (
+    !shopId ||
+    !whatsapp
+  ) {
+    return null;
+  }
+
+  const cleanWhatsapp =
+    String(
+      whatsapp
+    ).trim();
+
+  /*
+   * Recherche directe Firestore.
+   * Plus efficace que de charger tous les clients.
+   */
+  const snap =
+    await customersCollection()
+      .where(
+        "shopId",
+        "==",
+        String(shopId)
+      )
+      .where(
+        "whatsapp",
+        "==",
+        cleanWhatsapp
+      )
+      .limit(1)
+      .get();
+
+  if (
+    snap.empty
+  ) {
+    return null;
+  }
+
+  const doc =
+    snap.docs[0];
+
+  return {
+    id:
+      doc.id,
+
+    ...doc.data()
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER OU CRÉER AUTOMATIQUEMENT
+|--------------------------------------------------------------------------
+|
+| Utilisé notamment par Kendra lorsqu'un nouveau
+| client WhatsApp envoie son premier message.
+|
+|--------------------------------------------------------------------------
+*/
+
+async function getOrCreateCustomer(
+  shopId,
+  data = {}
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
+  }
+
+  const whatsapp =
+    String(
+      data.whatsapp ||
+      data.phone ||
+      ""
+    ).trim();
+
+  if (!whatsapp) {
+    throw new Error(
+      "whatsapp ou phone est obligatoire"
+    );
+  }
+
+  /*
+   * Chercher d'abord le client existant.
+   */
+  const existing =
+    await findByWhatsApp(
+      shopId,
+      whatsapp
+    );
+
+  if (existing) {
+    /*
+     * Mettre à jour le dernier contact.
+     */
+    await customersCollection()
+      .doc(existing.id)
+      .update({
+        lastContactAt:
+          timestamp(),
+
+        updatedAt:
+          timestamp()
+      });
+
+    return getCustomer(
+      shopId,
+      existing.id
+    );
+  }
+
+  /*
+   * Aucun client trouvé :
+   * création automatique.
+   */
+  return createCustomer(
+    shopId,
+    {
+      ...data,
+
+      whatsapp,
+
+      phone:
+        data.phone ||
+        whatsapp
+    }
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| METTRE À JOUR UN CLIENT
+|--------------------------------------------------------------------------
+*/
+
+async function updateCustomer(
+  shopId,
+  customerId,
+  data = {}
+) {
+  const customer =
+    await getCustomer(
+      shopId,
+      customerId
+    );
+
+  if (!customer) {
+    return null;
+  }
+
+  const allowed = [
+    "name",
+    "phone",
+    "whatsapp",
+    "email",
+    "address",
+    "notes"
+  ];
+
+  const update = {};
+
+  for (
+    const key of allowed
+  ) {
+    if (
+      data[key] !==
+      undefined
+    ) {
+      update[key] =
+        String(
+          data[key]
+        ).trim();
+    }
+  }
+
+  update.updatedAt =
+    timestamp();
+
+  await customersCollection()
+    .doc(String(customerId))
+    .update(update);
+
+  return getCustomer(
+    shopId,
+    customerId
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
 
 module.exports = {
   createCustomer,
   getCustomer,
   listCustomers,
   findByWhatsApp,
+  getOrCreateCustomer,
   updateCustomer
 };
