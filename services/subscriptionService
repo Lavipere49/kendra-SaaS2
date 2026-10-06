@@ -1,43 +1,144 @@
 const { getDb, timestamp } = require("../config/firebase");
 const { getPlan } = require("../config/plans");
 
+function cleanShopId(shopId) {
+  return String(shopId || "").trim();
+}
+
 async function getSubscription(shopId) {
-  const snap = await getDb().collection("subscriptions").doc(String(shopId)).get();
-  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+  const cleanId = cleanShopId(shopId);
+
+  if (!cleanId) {
+    return null;
+  }
+
+  const snap = await getDb()
+    .collection("subscriptions")
+    .doc(cleanId)
+    .get();
+
+  return snap.exists
+    ? {
+        id: snap.id,
+        ...snap.data()
+      }
+    : null;
 }
 
 function isExpired(subscription) {
-  if (!subscription) return true;
-  if (subscription.status !== "active") return true;
-  if (!subscription.expiresAt) return false;
+  if (!subscription) {
+    return true;
+  }
 
-  const expires = subscription.expiresAt.toDate
-    ? subscription.expiresAt.toDate()
-    : new Date(subscription.expiresAt);
+  if (subscription.status !== "active") {
+    return true;
+  }
+
+  /*
+   * Une souscription active sans expiresAt est considérée
+   * comme non expirée.
+   */
+  if (!subscription.expiresAt) {
+    return false;
+  }
+
+  let expires;
+
+  try {
+    expires = subscription.expiresAt.toDate
+      ? subscription.expiresAt.toDate()
+      : new Date(subscription.expiresAt);
+  } catch {
+    return true;
+  }
+
+  if (Number.isNaN(expires.getTime())) {
+    return true;
+  }
 
   return expires.getTime() <= Date.now();
 }
 
 async function assertActive(shopId) {
-  const subscription = await getSubscription(shopId);
+  const cleanId = cleanShopId(shopId);
+
+  if (!cleanId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  const subscription = await getSubscription(cleanId);
+
   if (!subscription || isExpired(subscription)) {
     throw new Error("ABONNEMENT_INACTIF");
   }
+
   return subscription;
 }
 
 async function getLimits(shopId) {
-  const subscription = await getSubscription(shopId);
-  const plan = getPlan(subscription?.plan);
-  return { subscription, plan, active: !isExpired(subscription) };
+  const cleanId = cleanShopId(shopId);
+
+  if (!cleanId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  const subscription = await getSubscription(cleanId);
+
+  /*
+   * Si aucun abonnement n'existe, FREE est utilisé comme plan
+   * de référence pour permettre au système d'afficher les limites.
+   */
+  const plan = getPlan(subscription?.plan || "FREE");
+
+  return {
+    subscription,
+    plan,
+    active: !isExpired(subscription)
+  };
 }
 
 async function canUse(shopId, metric, increment = 1) {
-  const { subscription, plan, active } = await getLimits(shopId);
-  if (!active) return { allowed: false, reason: "ABONNEMENT_INACTIF" };
+  const cleanId = cleanShopId(shopId);
 
-  const usageSnap = await getDb().collection("usage").doc(String(shopId)).get();
-  const usage = usageSnap.exists ? usageSnap.data() : {};
+  if (!cleanId) {
+    return {
+      allowed: false,
+      reason: "SHOP_ID_MANQUANT"
+    };
+  }
+
+  const amount = Number(increment);
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    return {
+      allowed: false,
+      reason: "INCREMENT_INVALIDE"
+    };
+  }
+
+  const {
+    subscription,
+    plan,
+    active
+  } = await getLimits(cleanId);
+
+  if (!active) {
+    return {
+      allowed: false,
+      reason: "ABONNEMENT_INACTIF",
+      subscription,
+      plan
+    };
+  }
+
+  const usageSnap = await getDb()
+    .collection("usage")
+    .doc(cleanId)
+    .get();
+
+  const usage = usageSnap.exists
+    ? usageSnap.data()
+    : {};
 
   const map = {
     products: "maxProducts",
@@ -46,43 +147,161 @@ async function canUse(shopId, metric, increment = 1) {
   };
 
   const limitKey = map[metric];
-  if (!limitKey) return { allowed: true, subscription, plan, usage };
 
-  const current = Number(usage[metric] || 0);
+  /*
+   * Une métrique inconnue n'est pas bloquée ici.
+   */
+  if (!limitKey) {
+    return {
+      allowed: true,
+      subscription,
+      plan,
+      usage
+    };
+  }
+
+  const current = Math.max(
+    0,
+    Number(usage[metric] || 0)
+  );
+
   const limit = Number(plan[limitKey]);
 
+  /*
+   * Une limite négative ou invalide est considérée
+   * comme une configuration incorrecte.
+   */
+  if (!Number.isFinite(limit) || limit < 0) {
+    return {
+      allowed: false,
+      reason: `LIMITE_${metric.toUpperCase()}_INVALIDE`,
+      current,
+      limit,
+      subscription,
+      plan
+    };
+  }
+
+  const next = current + amount;
+  const allowed = next <= limit;
+
   return {
-    allowed: current + increment <= limit,
-    reason: current + increment <= limit ? null : `LIMITE_${metric.toUpperCase()}`,
+    allowed,
+    reason: allowed
+      ? null
+      : `LIMITE_${metric.toUpperCase()}`,
     current,
     limit,
+    remaining: Math.max(0, limit - current),
+    requested: amount,
     subscription,
-    plan
+    plan,
+    usage
   };
 }
 
-async function activateSubscription(shopId, planName, days = 30) {
+async function activateSubscription(
+  shopId,
+  planName,
+  days = 30
+) {
+  const cleanId = cleanShopId(shopId);
+
+  if (!cleanId) {
+    throw new Error("shopId est obligatoire");
+  }
+
   const plan = getPlan(planName);
-  const expiresAt = new Date(Date.now() + Number(days) * 86400000);
 
-  await getDb().collection("subscriptions").doc(String(shopId)).set({
-    shopId: String(shopId),
-    plan: plan.name,
-    status: "active",
-    expiresAt,
-    updatedAt: timestamp()
-  }, { merge: true });
+  if (!plan || !plan.name) {
+    throw new Error("PLAN_INVALIDE");
+  }
 
-  return getSubscription(shopId);
+  const duration = Number(days);
+
+  if (
+    !Number.isFinite(duration) ||
+    duration <= 0
+  ) {
+    throw new Error("DUREE_ABONNEMENT_INVALIDE");
+  }
+
+  const expiresAt = new Date(
+    Date.now() + duration * 86400000
+  );
+
+  await getDb()
+    .collection("subscriptions")
+    .doc(cleanId)
+    .set(
+      {
+        shopId: cleanId,
+        plan: plan.name,
+        status: "active",
+        expiresAt,
+        startedAt: timestamp(),
+        updatedAt: timestamp()
+      },
+      {
+        merge: true
+      }
+    );
+
+  /*
+   * On synchronise également le plan de la boutique.
+   */
+  await getDb()
+    .collection("shops")
+    .doc(cleanId)
+    .set(
+      {
+        plan: plan.name,
+        subscriptionStatus: "active",
+        subscriptionExpiresAt: expiresAt,
+        updatedAt: timestamp()
+      },
+      {
+        merge: true
+      }
+    );
+
+  return getSubscription(cleanId);
 }
 
 async function deactivateSubscription(shopId) {
-  await getDb().collection("subscriptions").doc(String(shopId)).set({
-    status: "inactive",
-    updatedAt: timestamp()
-  }, { merge: true });
+  const cleanId = cleanShopId(shopId);
 
-  return getSubscription(shopId);
+  if (!cleanId) {
+    throw new Error("shopId est obligatoire");
+  }
+
+  await getDb()
+    .collection("subscriptions")
+    .doc(cleanId)
+    .set(
+      {
+        status: "inactive",
+        updatedAt: timestamp()
+      },
+      {
+        merge: true
+      }
+    );
+
+  await getDb()
+    .collection("shops")
+    .doc(cleanId)
+    .set(
+      {
+        subscriptionStatus: "inactive",
+        updatedAt: timestamp()
+      },
+      {
+        merge: true
+      }
+    );
+
+  return getSubscription(cleanId);
 }
 
 module.exports = {
