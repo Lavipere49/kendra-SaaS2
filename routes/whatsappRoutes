@@ -1,764 +1,243 @@
 const express = require("express");
-
 const router = express.Router();
 
 const whatsapp = require("../services/whatsappService");
-
 const {
-  getShopByWhatsAppPhoneNumberId
+  getShopByEvolutionInstanceName
 } = require("../services/shopService");
-
 const kendra = require("../services/kendraService");
 const { admin, getDb } = require("../config/firebase");
 
+async function getAuthenticatedShopId(req) {
+  const authorization = String(req.headers.authorization || "");
+  if (!authorization.startsWith("Bearer ")) {
+    const error = new Error("AUTHENTICATION_REQUIRED");
+    error.status = 401;
+    throw error;
+  }
+
+  const idToken = authorization.slice(7).trim();
+  const decoded = await admin.auth().verifyIdToken(idToken);
+  const uid = String(decoded.uid || "").trim();
+  if (!uid) throw Object.assign(new Error("FIREBASE_UID_MANQUANT"), { status: 401 });
+
+  const snap = await getDb().collection("users").doc(uid).get();
+  if (!snap.exists) throw Object.assign(new Error("MERCHANT_PROFILE_NOT_FOUND"), { status: 403 });
+
+  const shopId = String(snap.data()?.shopId || "").trim();
+  if (!shopId) throw Object.assign(new Error("SHOP_ID_NOT_LINKED_TO_MERCHANT"), { status: 403 });
+  return shopId;
+}
 
 /*
 |--------------------------------------------------------------------------
-| CONNEXION WHATSAPP — META EMBEDDED SIGNUP
-|--------------------------------------------------------------------------
-|
-| Le frontend transmet :
-|
-| {
-|   shopId,
-|   code,
-|   wabaId,
-|   phoneNumberId,
-|   phoneNumber
-| }
-|
-| Le code est échangé côté serveur contre le token
-| WhatsApp de la boutique.
-|
-| Le WABA et le Phone Number ID ne sont pas obligatoires
-| ici : le service WhatsApp peut les récupérer si nécessaire.
-|
+| CRÉER/OUVRIR UNE CONNEXION EVOLUTION
 |--------------------------------------------------------------------------
 */
-
 router.post("/connect", async (req, res) => {
-
   try {
-
-    /*
-     * Le navigateur peut envoyer des données de session Meta,
-     * mais le shopId n'est jamais considéré comme une donnée
-     * d'identité fiable.
-     *
-     * On récupère l'uid depuis le Firebase ID token puis le shopId
-     * depuis users/{uid}.
-     */
-    const authorization = String(
-      req.headers.authorization || ""
-    );
-
-    if (!authorization.startsWith("Bearer ")) {
-      return res.status(401).json({
-        success: false,
-        error: "AUTHENTICATION_REQUIRED"
-      });
-    }
-
-    const idToken = authorization.slice(7).trim();
-
-    if (!idToken) {
-      return res.status(401).json({
-        success: false,
-        error: "FIREBASE_ID_TOKEN_MANQUANT"
-      });
-    }
-
-    const decoded =
-      await admin.auth().verifyIdToken(idToken);
-
-    const uid = String(decoded.uid || "").trim();
-
-    if (!uid) {
-      return res.status(401).json({
-        success: false,
-        error: "FIREBASE_UID_MANQUANT"
-      });
-    }
-
-    const db = getDb();
-    const userSnap = await db
-      .collection("users")
-      .doc(uid)
-      .get();
-
-    if (!userSnap.exists) {
-      return res.status(403).json({
-        success: false,
-        error: "MERCHANT_PROFILE_NOT_FOUND"
-      });
-    }
-
-    const userData = userSnap.data() || {};
-    const cleanShopId = String(userData.shopId || "").trim();
-
-    if (!cleanShopId) {
-      return res.status(403).json({
-        success: false,
-        error: "SHOP_ID_NOT_LINKED_TO_MERCHANT"
-      });
-    }
-
-    const {
-      code,
-      wabaId,
-      phoneNumberId,
-      phoneNumber
-    } = req.body || {};
-
-    const cleanCode = String(code || "").trim();
-
-    if (!cleanCode) {
-      return res.status(400).json({
-        success: false,
-        error: "Code Meta Embedded Signup manquant"
-      });
-    }
-
-    const cleanWabaId = String(wabaId || "").trim();
-    const cleanPhoneNumberId = String(phoneNumberId || "").trim();
-    const cleanPhoneNumber = String(phoneNumber || "").trim();
-
-    console.log("META COEXISTENCE CONNECT:", {
-      uid,
-      shopId: cleanShopId,
-      wabaId: cleanWabaId || "(sera récupéré par le backend)",
-      phoneNumberId: cleanPhoneNumberId || "(sera récupéré par le backend)",
-      phoneNumber: cleanPhoneNumber || "(non fourni)",
-      hasCode: Boolean(cleanCode)
-    });
-
-    const result = await whatsapp.connectWhatsApp(
-      cleanShopId,
-      {
-        code: cleanCode,
-        wabaId: cleanWabaId,
-        phoneNumberId: cleanPhoneNumberId,
-        phoneNumber: cleanPhoneNumber
-      }
-    );
-
+    const shopId = await getAuthenticatedShopId(req);
+    const phoneNumber = String(req.body?.phoneNumber || "").trim();
+    const result = await whatsapp.connectWhatsApp(shopId, { phoneNumber });
     return res.json(result);
-
   } catch (error) {
-
-    console.error("WHATSAPP CONNECT ERROR:", error);
-
-    const authError =
-      error?.code === "auth/id-token-expired" ||
-      error?.code === "auth/argument-error" ||
-      error?.code === "auth/invalid-id-token";
-
-    return res.status(authError ? 401 : 400).json({
-      success: false,
-      error: error.message
-    });
-
+    console.error("EVOLUTION CONNECT ERROR:", error);
+    return res.status(error.status || 400).json({ success: false, error: error.message });
   }
-
 });
 
 /*
 |--------------------------------------------------------------------------
-| STATUT WHATSAPP
+| QR CODE
 |--------------------------------------------------------------------------
 */
-
-router.get(
-  "/:shopId/status",
-  async (req, res) => {
-
-    try {
-
-      const shopId =
-        String(
-          req.params.shopId || ""
-        ).trim();
-
-
-      if (!shopId) {
-
-        return res.status(400).json({
-          success: false,
-          error:
-            "shopId est obligatoire"
-        });
-
-      }
-
-
-      const result =
-        await whatsapp.getConnectionStatus(
-          shopId
-        );
-
-
-      return res.json({
-        success: true,
-        ...result
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP STATUS ERROR:",
-        error
-      );
-
-      return res.status(400).json({
-        success: false,
-        error:
-          error.message
-      });
-
+router.get("/qr", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    const shop = await require("../services/shopService").getShop(shopId);
+    const whatsappConfig = shop?.whatsapp || {};
+    const instanceName = String(whatsappConfig.evolutionInstanceName || "").trim();
+    const instanceToken = String(whatsappConfig.evolutionInstanceToken || "").trim();
+    if (!instanceName || !instanceToken) {
+      return res.status(400).json({ success: false, error: "INSTANCE_EVOLUTION_MANQUANTE" });
     }
 
+    // Reuse the same connection bootstrap; Evolution can return a fresh QR.
+    const result = await whatsapp.connectWhatsApp(shopId, {});
+    return res.json(result);
+  } catch (error) {
+    console.error("EVOLUTION QR ERROR:", error);
+    return res.status(error.status || 400).json({ success: false, error: error.message });
   }
-);
-
+});
 
 /*
 |--------------------------------------------------------------------------
-| DÉCONNEXION WHATSAPP
+| CODE DE JUMELAGE
 |--------------------------------------------------------------------------
 */
-
-router.post(
-  "/:shopId/disconnect",
-  async (req, res) => {
-
-    try {
-
-      const shopId =
-        String(
-          req.params.shopId || ""
-        ).trim();
-
-
-      if (!shopId) {
-
-        return res.status(400).json({
-          success: false,
-          error:
-            "shopId est obligatoire"
-        });
-
-      }
-
-
-      const result =
-        await whatsapp.disconnectWhatsApp(
-          shopId
-        );
-
-
-      return res.json(result);
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP DISCONNECT ERROR:",
-        error
-      );
-
-      return res.status(400).json({
-        success: false,
-        error:
-          error.message
-      });
-
-    }
-
+router.post("/pair", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    const phone = String(req.body?.phoneNumber || req.body?.phone || "").trim();
+    const result = await whatsapp.requestPairingCode(shopId, phone);
+    return res.json(result);
+  } catch (error) {
+    console.error("EVOLUTION PAIR ERROR:", error);
+    return res.status(error.status || 400).json({ success: false, error: error.message });
   }
-);
-
+});
 
 /*
 |--------------------------------------------------------------------------
-| META WEBHOOK — VÉRIFICATION
+| STATUT
 |--------------------------------------------------------------------------
 */
+router.get("/status", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    return res.json({ success: true, ...(await whatsapp.getConnectionStatus(shopId)) });
+  } catch (error) {
+    console.error("EVOLUTION STATUS ERROR:", error);
+    return res.status(error.status || 400).json({ success: false, error: error.message });
+  }
+});
 
-router.get(
-  "/webhook",
-  (req, res) => {
+// Compatibilité avec les anciennes pages qui appellent /:shopId/status.
+router.get("/:shopId/status", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    if (String(req.params.shopId) !== shopId) {
+      return res.status(403).json({ success: false, error: "SHOP_ACCESS_DENIED" });
+    }
+    return res.json({ success: true, ...(await whatsapp.getConnectionStatus(shopId)) });
+  } catch (error) {
+    return res.status(error.status || 400).json({ success: false, error: error.message });
+  }
+});
 
-    const mode =
-      req.query["hub.mode"];
+/*
+|--------------------------------------------------------------------------
+| DÉCONNEXION
+|--------------------------------------------------------------------------
+*/
+router.post("/disconnect", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    return res.json(await whatsapp.disconnectWhatsApp(shopId));
+  } catch (error) {
+    console.error("EVOLUTION DISCONNECT ERROR:", error);
+    return res.status(error.status || 400).json({ success: false, error: error.message });
+  }
+});
 
-    const token =
-      req.query["hub.verify_token"];
+router.post("/:shopId/disconnect", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    if (String(req.params.shopId) !== shopId) {
+      return res.status(403).json({ success: false, error: "SHOP_ACCESS_DENIED" });
+    }
+    return res.json(await whatsapp.disconnectWhatsApp(shopId));
+  } catch (error) {
+    return res.status(error.status || 400).json({ success: false, error: error.message });
+  }
+});
 
-    const challenge =
-      req.query["hub.challenge"];
+/*
+|--------------------------------------------------------------------------
+| WEBHOOK EVOLUTION API
+|--------------------------------------------------------------------------
+*/
+router.post("/evolution/webhook", async (req, res) => {
+  try {
+    const expectedSecret = String(process.env.EVOLUTION_WEBHOOK_SECRET || "").trim();
+    if (expectedSecret) {
+      const received = String(req.query.secret || req.headers["x-evolution-secret"] || "").trim();
+      if (received !== expectedSecret) return res.sendStatus(401);
+    }
 
-    const verifyToken =
-      String(
-        process.env.WHATSAPP_VERIFY_TOKEN ||
+    const normalized = whatsapp.normalizeEvolutionWebhook(req.body || {});
+    if (!normalized.instance) return res.sendStatus(200);
+
+    const shop = await getShopByEvolutionInstanceName(normalized.instance);
+    if (!shop) {
+      console.warn("EVOLUTION WEBHOOK: SHOP NOT FOUND:", normalized.instance);
+      return res.sendStatus(200);
+    }
+
+    const event = normalized.event;
+
+    if (event.includes("CONNECTION_UPDATE") || event.includes("CONNECTION")) {
+      const state = String(
+        req.body?.data?.state ||
+        req.body?.data?.status ||
+        req.body?.data?.connection ||
         ""
-      ).trim();
-
+      ).toLowerCase();
+      const connected = ["open", "connected", "online"].includes(state);
+      await require("../services/shopService").updateShop(shop.id, {
+        whatsapp: {
+          ...(shop.whatsapp || {}),
+          provider: "evolution",
+          connected,
+          updatedAt: new Date().toISOString()
+        }
+      });
+    }
 
     if (
-      mode === "subscribe" &&
-      token &&
-      verifyToken &&
-      token === verifyToken
+      (event.includes("MESSAGES_UPSERT") || event === "MESSAGE" || event.includes("MESSAGE_UPSERT")) &&
+      normalized.remoteJid &&
+      !normalized.fromMe &&
+      normalized.text
     ) {
-
-      console.log(
-        "META WEBHOOK VERIFIED"
-      );
-
-      return res
-        .status(200)
-        .send(challenge);
-
-    }
-
-
-    console.warn(
-      "META WEBHOOK VERIFICATION FAILED"
-    );
-
-    return res.sendStatus(403);
-
-  }
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| META WEBHOOK — MESSAGES
-|--------------------------------------------------------------------------
-*/
-
-router.post(
-  "/webhook",
-  async (req, res) => {
-
-    try {
-
-      const body =
-        req.body;
-
-
-      /*
-      |--------------------------------------------------------------------------
-      | VÉRIFICATION ÉVÉNEMENT WHATSAPP
-      |--------------------------------------------------------------------------
-      */
-
-      if (
-        !body ||
-        body.object !==
-          "whatsapp_business_account"
-      ) {
-
-        return res.sendStatus(404);
-
-      }
-
-
-      /*
-      |--------------------------------------------------------------------------
-      | ENTRÉES META
-      |--------------------------------------------------------------------------
-      */
-
-      for (
-        const entry of
-        body.entry || []
-      ) {
-
-        for (
-          const change of
-          entry.changes || []
-        ) {
-
-          if (
-            change.field !==
-            "messages"
-          ) {
-            continue;
-          }
-
-
-          const value =
-            change.value || {};
-
-
-          /*
-          |--------------------------------------------------------------------------
-          | PHONE NUMBER ID
-          |--------------------------------------------------------------------------
-          */
-
-          const phoneNumberId =
-            String(
-              value.metadata?.phone_number_id ||
-              ""
-            ).trim();
-
-
-          if (!phoneNumberId) {
-
-            console.warn(
-              "META WEBHOOK: phone_number_id missing"
-            );
-
-            continue;
-
-          }
-
-
-          /*
-          |--------------------------------------------------------------------------
-          | RECHERCHE DE LA BOUTIQUE
-          |--------------------------------------------------------------------------
-          */
-
-          const shop =
-            await getShopByWhatsAppPhoneNumberId(
-              phoneNumberId
-            );
-
-
-          if (!shop) {
-
-            console.warn(
-              "META WEBHOOK: SHOP NOT FOUND FOR PHONE NUMBER:",
-              phoneNumberId
-            );
-
-            continue;
-
-          }
-
-
-          /*
-          |--------------------------------------------------------------------------
-          | MESSAGES
-          |--------------------------------------------------------------------------
-          */
-
-          for (
-            const message of
-            value.messages || []
-          ) {
-
-            /*
-            |--------------------------------------------------------------------------
-            | MESSAGE TEXTE
-            |--------------------------------------------------------------------------
-            */
-
-            if (
-              message.type !==
-              "text"
-            ) {
-
-              console.log(
-                "META MESSAGE TYPE NOT SUPPORTED:",
-                message.type
-              );
-
-              continue;
-
-            }
-
-
-            const from =
-              String(
-                message.from || ""
-              ).trim();
-
-
-            const text =
-              String(
-                message.text?.body || ""
-              ).trim();
-
-
-            if (
-              !from ||
-              !text
-            ) {
-              continue;
-            }
-
-
-            console.log(
-              `MESSAGE FROM ${from} -> SHOP ${shop.id}:`,
-              text
-            );
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | CLIENT
-            |--------------------------------------------------------------------------
-            */
-
-            const customerId =
-              from;
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | KENDRA
-            |--------------------------------------------------------------------------
-            */
-
-            const result =
-              await kendra.handleMessage({
-
-                shopId:
-                  shop.id,
-
-                customerId,
-
-                text,
-
-                channel:
-                  "whatsapp"
-
-              });
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | RÉPONSE KENDRA
-            |--------------------------------------------------------------------------
-            */
-
-            if (
-              result?.reply
-            ) {
-
-              await whatsapp.sendMessage({
-
-                shopId:
-                  shop.id,
-
-                to:
-                  from,
-
-                text:
-                  result.reply
-
-              });
-
-            }
-
-          }
-
-        }
-
-      }
-
-
-      /*
-      |--------------------------------------------------------------------------
-      | META ATTEND HTTP 200
-      |--------------------------------------------------------------------------
-      */
-
-      return res.sendStatus(200);
-
-    } catch (error) {
-
-      console.error(
-        "META WHATSAPP WEBHOOK ERROR:",
-        error
-      );
-
-
-      /*
-      * On répond quand même 200 à Meta pour éviter
-      * des répétitions inutiles du même événement.
-      */
-
-      return res.sendStatus(200);
-
-    }
-
-  }
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| ROUTE INTERNE — MESSAGE ENTRANT
-|--------------------------------------------------------------------------
-*/
-
-router.post(
-  "/:shopId/incoming",
-  async (req, res) => {
-
-    try {
-
-      const shopId =
-        String(
-          req.params.shopId || ""
-        ).trim();
-
-      const {
+      const customerId = normalized.remoteJid.split("@")[0];
+      const result = await kendra.handleMessage({
+        shopId: shop.id,
         customerId,
-        text
-      } = req.body || {};
+        text: normalized.text,
+        channel: "whatsapp"
+      });
 
-
-      if (
-        !shopId ||
-        !customerId ||
-        !text
-      ) {
-
-        return res.status(400).json({
-          success: false,
-          error:
-            "shopId, customerId et text sont obligatoires"
+      if (result?.reply) {
+        await whatsapp.sendMessage({
+          shopId: shop.id,
+          to: customerId,
+          text: result.reply
         });
-
       }
-
-
-      const result =
-        await kendra.handleMessage({
-
-          shopId,
-
-          customerId:
-            String(customerId),
-
-          text:
-            String(text),
-
-          channel:
-            "whatsapp"
-
-        });
-
-
-      return res.json({
-        success: true,
-        ...result
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP INCOMING ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
-
     }
 
+    return res.sendStatus(200);
+  } catch (error) {
+    console.error("EVOLUTION WEBHOOK ERROR:", error);
+    return res.sendStatus(200);
   }
-);
-
+});
 
 /*
 |--------------------------------------------------------------------------
-| ROUTE INTERNE — ENVOYER UN MESSAGE
+| ENVOYER UN MESSAGE MANUELLEMENT
 |--------------------------------------------------------------------------
 */
-
-router.post(
-  "/:shopId/send",
-  async (req, res) => {
-
-    try {
-
-      const shopId =
-        String(
-          req.params.shopId || ""
-        ).trim();
-
-      const {
-        to,
-        text
-      } = req.body || {};
-
-
-      const cleanTo =
-        String(
-          to || ""
-        ).trim();
-
-      const cleanText =
-        String(
-          text || ""
-        ).trim();
-
-
-      if (
-        !shopId ||
-        !cleanTo ||
-        !cleanText
-      ) {
-
-        return res.status(400).json({
-          success: false,
-          error:
-            "shopId, to et text sont obligatoires"
-        });
-
-      }
-
-
-      const result =
-        await whatsapp.sendMessage({
-
-          shopId,
-
-          to:
-            cleanTo,
-
-          text:
-            cleanText
-
-        });
-
-
-      return res.json({
-
-        success:
-          true,
-
-        result
-
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP SEND ERROR:",
-        error
-      );
-
-      return res.status(500).json({
-        success: false,
-        error:
-          error.message
-      });
-
+router.post("/:shopId/send", async (req, res) => {
+  try {
+    const shopId = await getAuthenticatedShopId(req);
+    if (String(req.params.shopId) !== shopId) {
+      return res.status(403).json({ success: false, error: "SHOP_ACCESS_DENIED" });
     }
 
-  }
-);
+    const to = String(req.body?.to || "").trim();
+    const text = String(req.body?.text || "").trim();
+    if (!to || !text) {
+      return res.status(400).json({ success: false, error: "shopId, to et text sont obligatoires" });
+    }
 
+    return res.json({ success: true, result: await whatsapp.sendMessage({ shopId, to, text }) });
+  } catch (error) {
+    console.error("EVOLUTION SEND ERROR:", error);
+    return res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
 
 module.exports = router;
