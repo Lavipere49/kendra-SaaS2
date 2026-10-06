@@ -1,142 +1,627 @@
 const { getDb, timestamp } = require("../config/firebase");
+const admin = require("firebase-admin");
 
-async function getOrCreateConversation(shopId, customerId, channel = "whatsapp") {
-  const db = getDb();
-  const existing = await db.collection("conversations")
-    .where("shopId", "==", String(shopId))
-    .where("customerId", "==", String(customerId))
-    .where("channel", "==", channel)
-    .where("status", "==", "open")
-    .limit(1)
-    .get();
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER OU CRÉER UNE CONVERSATION
+|--------------------------------------------------------------------------
+*/
 
-  if (!existing.empty) {
-    const doc = existing.docs[0];
-    return { id: doc.id, ...doc.data() };
+async function getOrCreateConversation(
+  shopId,
+  customerId,
+  channel = "whatsapp"
+) {
+  if (!shopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  const ref = db.collection("conversations").doc();
+  if (!customerId) {
+    throw new Error(
+      "customerId est obligatoire"
+    );
+  }
+
+  const db =
+    getDb();
+
+  const cleanShopId =
+    String(shopId);
+
+  const cleanCustomerId =
+    String(customerId);
+
+  const cleanChannel =
+    String(channel || "whatsapp");
+
+  const existing =
+    await db
+      .collection("conversations")
+      .where(
+        "shopId",
+        "==",
+        cleanShopId
+      )
+      .where(
+        "customerId",
+        "==",
+        cleanCustomerId
+      )
+      .where(
+        "channel",
+        "==",
+        cleanChannel
+      )
+      .where(
+        "status",
+        "==",
+        "open"
+      )
+      .limit(1)
+      .get();
+
+  if (!existing.empty) {
+    const doc =
+      existing.docs[0];
+
+    return {
+      id:
+        doc.id,
+
+      ...doc.data()
+    };
+  }
+
+  const ref =
+    db
+      .collection("conversations")
+      .doc();
+
   const conversation = {
-    id: ref.id,
-    shopId: String(shopId),
-    customerId: String(customerId),
-    channel,
-    status: "open",
-    context: {},
-    messageCount: 0,
-    lastMessageAt: timestamp(),
-    createdAt: timestamp(),
-    updatedAt: timestamp()
+    id:
+      ref.id,
+
+    shopId:
+      cleanShopId,
+
+    customerId:
+      cleanCustomerId,
+
+    channel:
+      cleanChannel,
+
+    status:
+      "open",
+
+    context:
+      {},
+
+    messageCount:
+      0,
+
+    lastMessageAt:
+      timestamp(),
+
+    createdAt:
+      timestamp(),
+
+    updatedAt:
+      timestamp()
   };
 
-  await ref.set(conversation);
+  await ref.set(
+    conversation
+  );
+
   return conversation;
 }
 
-async function addMessage(shopId, conversationId, message) {
-  const db = getDb();
-  const ref = db.collection("conversations").doc(conversationId);
-  const snap = await ref.get();
+/*
+|--------------------------------------------------------------------------
+| AJOUTER UN MESSAGE
+|--------------------------------------------------------------------------
+*/
 
-  if (!snap.exists || snap.data().shopId !== String(shopId)) {
-    throw new Error("Conversation invalide pour cette boutique");
+async function addMessage(
+  shopId,
+  conversationId,
+  message = {}
+) {
+  if (
+    !shopId ||
+    !conversationId
+  ) {
+    throw new Error(
+      "shopId et conversationId sont obligatoires"
+    );
   }
 
-  const messageRef = ref.collection("messages").doc();
+  const db =
+    getDb();
+
+  const ref =
+    db
+      .collection("conversations")
+      .doc(
+        String(conversationId)
+      );
+
+  const snap =
+    await ref.get();
+
+  if (
+    !snap.exists ||
+    String(
+      snap.data().shopId
+    ) !== String(shopId)
+  ) {
+    throw new Error(
+      "Conversation invalide pour cette boutique"
+    );
+  }
+
+  const messageRef =
+    ref
+      .collection("messages")
+      .doc();
 
   const messageData = {
-    id: messageRef.id,
-    role: message.role || "user",
-    text: String(message.text || ""),
-    source: message.source || "whatsapp",
-    createdAt: timestamp()
+    id:
+      messageRef.id,
+
+    role:
+      message.role || "user",
+
+    text:
+      String(
+        message.text || ""
+      ),
+
+    source:
+      message.source || "whatsapp",
+
+    createdAt:
+      timestamp()
   };
 
-  const batch = db.batch();
-  batch.set(messageRef, messageData);
-  batch.update(ref, {
-    messageCount: require("firebase-admin").firestore.FieldValue.increment(1),
-    lastMessageAt: timestamp(),
-    updatedAt: timestamp()
-  });
+  const batch =
+    db.batch();
+
+  batch.set(
+    messageRef,
+    messageData
+  );
+
+  batch.update(
+    ref,
+    {
+      messageCount:
+        admin.firestore.FieldValue.increment(
+          1
+        ),
+
+      lastMessageAt:
+        timestamp(),
+
+      updatedAt:
+        timestamp()
+    }
+  );
 
   await batch.commit();
+
   return messageData;
 }
 
-async function getMessages(shopId, conversationId) {
-  const conversation = await dbConversation(shopId, conversationId);
-  if (!conversation) return null;
+/*
+|--------------------------------------------------------------------------
+| RÉCUPÉRER LES MESSAGES
+|--------------------------------------------------------------------------
+*/
 
-  const snap = await getDb().collection("conversations")
-    .doc(conversationId)
-    .collection("messages")
-    .orderBy("createdAt", "asc")
-    .get();
+async function getMessages(
+  shopId,
+  conversationId
+) {
+  const conversation =
+    await dbConversation(
+      shopId,
+      conversationId
+    );
 
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  if (!conversation) {
+    return null;
+  }
+
+  const snap =
+    await getDb()
+      .collection("conversations")
+      .doc(String(conversationId))
+      .collection("messages")
+      .orderBy(
+        "createdAt",
+        "asc"
+      )
+      .get();
+
+  return snap.docs.map(
+    doc => ({
+      id:
+        doc.id,
+
+      ...doc.data()
+    })
+  );
 }
 
-async function updateContext(shopId, conversationId, context) {
-  const conversation = await dbConversation(shopId, conversationId);
-  if (!conversation) return null;
+/*
+|--------------------------------------------------------------------------
+| METTRE À JOUR LE CONTEXTE
+|--------------------------------------------------------------------------
+*/
 
-  await getDb().collection("conversations").doc(conversationId).set({
-    context: context || {},
-    updatedAt: timestamp()
-  }, { merge: true });
+async function updateContext(
+  shopId,
+  conversationId,
+  context
+) {
+  const conversation =
+    await dbConversation(
+      shopId,
+      conversationId
+    );
 
-  const snap = await getDb().collection("conversations").doc(conversationId).get();
-  return { id: snap.id, ...snap.data() };
-}
+  if (!conversation) {
+    return null;
+  }
 
-async function closeConversation(shopId, conversationId) {
-  const conversation = await dbConversation(shopId, conversationId);
-  if (!conversation) return null;
+  const ref =
+    getDb()
+      .collection("conversations")
+      .doc(
+        String(conversationId)
+      );
 
-  await getDb().collection("conversations").doc(conversationId).update({
-    status: "closed",
-    updatedAt: timestamp()
-  });
+  await ref.set(
+    {
+      context:
+        context || {},
 
-  const snap = await getDb().collection("conversations").doc(conversationId).get();
-  return { id: snap.id, ...snap.data() };
-}
-
-async function dbConversation(shopId, conversationId) {
-  const snap = await getDb().collection("conversations").doc(conversationId).get();
-  if (!snap.exists || snap.data().shopId !== String(shopId)) return null;
-  return { id: snap.id, ...snap.data() };
-}
-
-async function listConversations(shopId) {
-  const snap = await getDb().collection("conversations")
-    .where("shopId", "==", String(shopId))
-    .get();
-
-  const conversations = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-  conversations.sort((a, b) => {
-    const ad = a.lastMessageAt?.toDate ? a.lastMessageAt.toDate().getTime() : new Date(a.lastMessageAt || 0).getTime();
-    const bd = b.lastMessageAt?.toDate ? b.lastMessageAt.toDate().getTime() : new Date(b.lastMessageAt || 0).getTime();
-    return bd - ad;
-  });
-
-  const customerIds = [...new Set(conversations.map(c => c.customerId).filter(Boolean))];
-  const customers = await Promise.all(customerIds.map(id => getDb().collection("customers").doc(id).get()));
-  const customerMap = new Map(
-    customers.filter(s => s.exists).map(s => [s.id, { id: s.id, ...s.data() }])
+      updatedAt:
+        timestamp()
+    },
+    {
+      merge: true
+    }
   );
 
-  return conversations.map(c => {
-    const customer = customerMap.get(c.customerId) || {};
-    return {
-      ...c,
-      customerName: customer.name || "Client",
-      customerPhone: customer.whatsapp || customer.phone || "",
-      customer: customer.id ? customer : null
-    };
-  });
+  const snap =
+    await ref.get();
+
+  return {
+    id:
+      snap.id,
+
+    ...snap.data()
+  };
 }
+
+/*
+|--------------------------------------------------------------------------
+| FERMER UNE CONVERSATION
+|--------------------------------------------------------------------------
+*/
+
+async function closeConversation(
+  shopId,
+  conversationId
+) {
+  const conversation =
+    await dbConversation(
+      shopId,
+      conversationId
+    );
+
+  if (!conversation) {
+    return null;
+  }
+
+  const ref =
+    getDb()
+      .collection("conversations")
+      .doc(
+        String(conversationId)
+      );
+
+  await ref.update({
+    status:
+      "closed",
+
+    updatedAt:
+      timestamp()
+  });
+
+  const snap =
+    await ref.get();
+
+  return {
+    id:
+      snap.id,
+
+    ...snap.data()
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| VÉRIFIER UNE CONVERSATION
+|--------------------------------------------------------------------------
+*/
+
+async function dbConversation(
+  shopId,
+  conversationId
+) {
+  if (
+    !shopId ||
+    !conversationId
+  ) {
+    return null;
+  }
+
+  const snap =
+    await getDb()
+      .collection("conversations")
+      .doc(
+        String(conversationId)
+      )
+      .get();
+
+  if (
+    !snap.exists ||
+    String(
+      snap.data().shopId
+    ) !== String(shopId)
+  ) {
+    return null;
+  }
+
+  return {
+    id:
+      snap.id,
+
+    ...snap.data()
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| LISTER LES CONVERSATIONS
+|--------------------------------------------------------------------------
+*/
+
+async function listConversations(
+  shopId
+) {
+  if (!shopId) {
+    return [];
+  }
+
+  const db =
+    getDb();
+
+  const snap =
+    await db
+      .collection("conversations")
+      .where(
+        "shopId",
+        "==",
+        String(shopId)
+      )
+      .get();
+
+  const conversations =
+    snap.docs.map(
+      doc => ({
+        id:
+          doc.id,
+
+        ...doc.data()
+      })
+    );
+
+  /*
+   * Trier par dernier message.
+   */
+  conversations.sort(
+    (a, b) => {
+      const ad =
+        a.lastMessageAt?.toDate
+          ? a.lastMessageAt
+              .toDate()
+              .getTime()
+          : new Date(
+              a.lastMessageAt || 0
+            ).getTime();
+
+      const bd =
+        b.lastMessageAt?.toDate
+          ? b.lastMessageAt
+              .toDate()
+              .getTime()
+          : new Date(
+              b.lastMessageAt || 0
+            ).getTime();
+
+      return bd - ad;
+    }
+  );
+
+  /*
+   * Récupérer les clients.
+   */
+  const customerIds =
+    [
+      ...new Set(
+        conversations
+          .map(
+            c =>
+              c.customerId
+          )
+          .filter(Boolean)
+      )
+    ];
+
+  /*
+   * Ici customerId correspond à l'identifiant
+   * logique utilisé par Kendra.
+   *
+   * On essaie d'abord comme ID Firestore.
+   */
+  const customerDocs =
+    await Promise.all(
+      customerIds.map(
+        id =>
+          db
+            .collection("customers")
+            .doc(String(id))
+            .get()
+      )
+    );
+
+  const customerMap =
+    new Map();
+
+  customerDocs.forEach(
+    doc => {
+      if (doc.exists) {
+        customerMap.set(
+          doc.id,
+          {
+            id:
+              doc.id,
+
+            ...doc.data()
+          }
+        );
+      }
+    }
+  );
+
+  /*
+   * Pour les conversations WhatsApp où customerId
+   * est le numéro WhatsApp, compléter avec une
+   * recherche par numéro si nécessaire.
+   */
+  const missingCustomerIds =
+    customerIds.filter(
+      id =>
+        !customerMap.has(
+          id
+        )
+    );
+
+  if (
+    missingCustomerIds.length
+  ) {
+    const customerSnap =
+      await db
+        .collection("customers")
+        .where(
+          "shopId",
+          "==",
+          String(shopId)
+        )
+        .get();
+
+    customerSnap.docs.forEach(
+      doc => {
+        const data =
+          doc.data();
+
+        const whatsapp =
+          String(
+            data.whatsapp || ""
+          );
+
+        const phone =
+          String(
+            data.phone || ""
+          );
+
+        if (
+          missingCustomerIds.includes(
+            whatsapp
+          ) ||
+          missingCustomerIds.includes(
+            phone
+          )
+        ) {
+          customerMap.set(
+            whatsapp,
+            {
+              id:
+                doc.id,
+
+              ...data
+            }
+          );
+
+          if (phone) {
+            customerMap.set(
+              phone,
+              {
+                id:
+                  doc.id,
+
+                ...data
+              }
+            );
+          }
+        }
+      }
+    );
+  }
+
+  /*
+   * Ajouter les informations client.
+   */
+  return conversations.map(
+    conversation => {
+      const customer =
+        customerMap.get(
+          conversation.customerId
+        ) || {};
+
+      return {
+        ...conversation,
+
+        customerName:
+          customer.name ||
+          "Client",
+
+        customerPhone:
+          customer.whatsapp ||
+          customer.phone ||
+          conversation.customerId ||
+          "",
+
+        customer:
+          customer.id
+            ? customer
+            : null
+      };
+    }
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
 
 module.exports = {
   getOrCreateConversation,
