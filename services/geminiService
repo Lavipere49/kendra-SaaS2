@@ -3,45 +3,120 @@ const { GoogleGenAI } = require("@google/genai");
 let client = null;
 
 function getClient() {
-  if (!process.env.GEMINI_API_KEY) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
     throw new Error("GEMINI_API_KEY_MISSING");
   }
-  if (!client) client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+  if (!client) {
+    client = new GoogleGenAI({
+      apiKey
+    });
+  }
+
   return client;
 }
 
+function getModel() {
+  return process.env.GEMINI_MODEL || "gemini-3.8-flash";
+}
+
+function extractResponseText(response) {
+  if (!response) {
+    return "";
+  }
+
+  if (typeof response.text === "string") {
+    return response.text.trim();
+  }
+
+  return "";
+}
+
 async function generateJson(prompt) {
+  if (!prompt || typeof prompt !== "string") {
+    throw new Error("GEMINI_PROMPT_MISSING");
+  }
+
   const ai = getClient();
-  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const model = getModel();
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      temperature: 0.2
-    }
-  });
+  let response;
 
-  const text = response.text || "{}";
+  try {
+    response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.2
+      }
+    });
+  } catch (error) {
+    console.error(
+      "Gemini JSON generation error:",
+      error?.message || error
+    );
+
+    throw new Error("GEMINI_API_ERROR");
+  }
+
+  const text = extractResponseText(response);
+
+  if (!text) {
+    throw new Error("GEMINI_EMPTY_RESPONSE");
+  }
+
   try {
     return JSON.parse(text);
-  } catch {
+  } catch (error) {
+    console.error(
+      "Gemini returned invalid JSON:",
+      text
+    );
+
     throw new Error("GEMINI_INVALID_JSON");
   }
 }
 
 async function generateText(prompt) {
+  if (!prompt || typeof prompt !== "string") {
+    throw new Error("GEMINI_PROMPT_MISSING");
+  }
+
   const ai = getClient();
-  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const model = getModel();
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: { temperature: 0.4 }
-  });
+  let response;
 
-  return response.text || "";
+  try {
+    response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        temperature: 0.4
+      }
+    });
+  } catch (error) {
+    console.error(
+      "Gemini text generation error:",
+      error?.message || error
+    );
+
+    throw new Error("GEMINI_API_ERROR");
+  }
+
+  const text = extractResponseText(response);
+
+  if (!text) {
+    throw new Error("GEMINI_EMPTY_RESPONSE");
+  }
+
+  return text;
 }
 
-module.exports = { generateJson, generateText };
+module.exports = {
+  generateJson,
+  generateText
+};
