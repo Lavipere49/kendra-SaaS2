@@ -9,6 +9,7 @@ const {
 } = require("../services/shopService");
 
 const kendra = require("../services/kendraService");
+const { admin, getDb } = require("../config/firebase");
 
 
 /*
@@ -39,135 +40,127 @@ router.post("/connect", async (req, res) => {
 
   try {
 
+    /*
+     * Le navigateur peut envoyer des données de session Meta,
+     * mais le shopId n'est jamais considéré comme une donnée
+     * d'identité fiable.
+     *
+     * On récupère l'uid depuis le Firebase ID token puis le shopId
+     * depuis users/{uid}.
+     */
+    const authorization = String(
+      req.headers.authorization || ""
+    );
+
+    if (!authorization.startsWith("Bearer ")) {
+      return res.status(401).json({
+        success: false,
+        error: "AUTHENTICATION_REQUIRED"
+      });
+    }
+
+    const idToken = authorization.slice(7).trim();
+
+    if (!idToken) {
+      return res.status(401).json({
+        success: false,
+        error: "FIREBASE_ID_TOKEN_MANQUANT"
+      });
+    }
+
+    const decoded =
+      await admin.auth().verifyIdToken(idToken);
+
+    const uid = String(decoded.uid || "").trim();
+
+    if (!uid) {
+      return res.status(401).json({
+        success: false,
+        error: "FIREBASE_UID_MANQUANT"
+      });
+    }
+
+    const db = getDb();
+    const userSnap = await db
+      .collection("users")
+      .doc(uid)
+      .get();
+
+    if (!userSnap.exists) {
+      return res.status(403).json({
+        success: false,
+        error: "MERCHANT_PROFILE_NOT_FOUND"
+      });
+    }
+
+    const userData = userSnap.data() || {};
+    const cleanShopId = String(userData.shopId || "").trim();
+
+    if (!cleanShopId) {
+      return res.status(403).json({
+        success: false,
+        error: "SHOP_ID_NOT_LINKED_TO_MERCHANT"
+      });
+    }
+
     const {
-      shopId,
       code,
       wabaId,
       phoneNumberId,
       phoneNumber
     } = req.body || {};
 
-
-    /*
-    |--------------------------------------------------------------------------
-    | VÉRIFICATION SHOP
-    |--------------------------------------------------------------------------
-    */
-
-    const cleanShopId =
-      String(shopId || "").trim();
-
-    if (!cleanShopId) {
-
-      return res.status(400).json({
-        success: false,
-        error: "shopId est obligatoire"
-      });
-
-    }
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | CODE META
-    |--------------------------------------------------------------------------
-    */
-
-    const cleanCode =
-      String(code || "").trim();
+    const cleanCode = String(code || "").trim();
 
     if (!cleanCode) {
-
       return res.status(400).json({
         success: false,
-        error:
-          "Code Meta Embedded Signup manquant"
+        error: "Code Meta Embedded Signup manquant"
       });
-
     }
 
+    const cleanWabaId = String(wabaId || "").trim();
+    const cleanPhoneNumberId = String(phoneNumberId || "").trim();
+    const cleanPhoneNumber = String(phoneNumber || "").trim();
 
-    /*
-    |--------------------------------------------------------------------------
-    | DONNÉES META
-    |--------------------------------------------------------------------------
-    */
+    console.log("META COEXISTENCE CONNECT:", {
+      uid,
+      shopId: cleanShopId,
+      wabaId: cleanWabaId || "(sera récupéré par le backend)",
+      phoneNumberId: cleanPhoneNumberId || "(sera récupéré par le backend)",
+      phoneNumber: cleanPhoneNumber || "(non fourni)",
+      hasCode: Boolean(cleanCode)
+    });
 
-    const cleanWabaId =
-      String(wabaId || "").trim();
-
-    const cleanPhoneNumberId =
-      String(phoneNumberId || "").trim();
-
-    const cleanPhoneNumber =
-      String(phoneNumber || "").trim();
-
-
-    console.log(
-      "META EMBEDDED SIGNUP CONNECT:",
+    const result = await whatsapp.connectWhatsApp(
+      cleanShopId,
       {
-        shopId:
-          cleanShopId,
-
-        wabaId:
-          cleanWabaId || "(non fourni)",
-
-        phoneNumberId:
-          cleanPhoneNumberId || "(non fourni)",
-
-        phoneNumber:
-          cleanPhoneNumber || "(non fourni)",
-
-        hasCode:
-          Boolean(cleanCode)
+        code: cleanCode,
+        wabaId: cleanWabaId,
+        phoneNumberId: cleanPhoneNumberId,
+        phoneNumber: cleanPhoneNumber
       }
     );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | CONNEXION WHATSAPP
-    |--------------------------------------------------------------------------
-    */
-
-    const result =
-      await whatsapp.connectWhatsApp(
-        cleanShopId,
-        {
-          code:
-            cleanCode,
-
-          wabaId:
-            cleanWabaId,
-
-          phoneNumberId:
-            cleanPhoneNumberId,
-
-          phoneNumber:
-            cleanPhoneNumber
-        }
-      );
-
 
     return res.json(result);
 
   } catch (error) {
 
-    console.error(
-      "WHATSAPP CONNECT ERROR:",
-      error
-    );
+    console.error("WHATSAPP CONNECT ERROR:", error);
 
-    return res.status(400).json({
+    const authError =
+      error?.code === "auth/id-token-expired" ||
+      error?.code === "auth/argument-error" ||
+      error?.code === "auth/invalid-id-token";
+
+    return res.status(authError ? 401 : 400).json({
       success: false,
-      error:
-        error.message
+      error: error.message
     });
 
   }
 
 });
-
 
 /*
 |--------------------------------------------------------------------------
