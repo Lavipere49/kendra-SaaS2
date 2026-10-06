@@ -1,78 +1,214 @@
 const { getDb, timestamp } = require("../config/firebase");
 
+function validateIds(shopId, customerId) {
+  if (!shopId) {
+    throw new Error("shopId requis");
+  }
+
+  if (!customerId) {
+    throw new Error("customerId requis");
+  }
+
+  return {
+    shopId: String(shopId).trim(),
+    customerId: String(customerId).trim()
+  };
+}
+
 function cartRef(shopId, customerId) {
-  return getDb().collection("carts").doc(`${shopId}_${customerId}`);
+  const ids = validateIds(shopId, customerId);
+
+  return getDb()
+    .collection("carts")
+    .doc(`${ids.shopId}_${ids.customerId}`);
+}
+
+function calculateTotal(items) {
+  return items.reduce((total, item) => {
+    return total + Number(item.subtotal || 0);
+  }, 0);
 }
 
 async function getCart(shopId, customerId) {
-  const snap = await cartRef(shopId, customerId).get();
-  return snap.exists
-    ? { id: snap.id, ...snap.data() }
-    : { id: `${shopId}_${customerId}`, shopId: String(shopId), customerId: String(customerId), items: [], total: 0 };
+  const ids = validateIds(shopId, customerId);
+
+  const ref = cartRef(ids.shopId, ids.customerId);
+  const snap = await ref.get();
+
+  if (!snap.exists) {
+    return {
+      id: snap.id,
+      shopId: ids.shopId,
+      customerId: ids.customerId,
+      items: [],
+      total: 0
+    };
+  }
+
+  const data = snap.data() || {};
+
+  return {
+    id: snap.id,
+    shopId: ids.shopId,
+    customerId: ids.customerId,
+    items: Array.isArray(data.items) ? data.items : [],
+    total: Number(data.total || 0),
+    createdAt: data.createdAt || null,
+    updatedAt: data.updatedAt || null
+  };
 }
 
 async function addItem(shopId, customerId, productId, quantity) {
-  const qty = Number(quantity);
-  if (!Number.isInteger(qty) || qty <= 0) throw new Error("Quantité invalide");
+  const ids = validateIds(shopId, customerId);
 
-  const productSnap = await getDb().collection("products").doc(productId).get();
-  if (!productSnap.exists || productSnap.data().shopId !== String(shopId)) {
-    throw new Error("Produit introuvable dans cette boutique");
+  if (!productId) {
+    throw new Error("productId requis");
+  }
+
+  const qty = Number(quantity);
+
+  if (!Number.isInteger(qty) || qty <= 0) {
+    throw new Error("Quantité invalide");
+  }
+
+  const productSnap = await getDb()
+    .collection("products")
+    .doc(String(productId))
+    .get();
+
+  if (!productSnap.exists) {
+    throw new Error("Produit introuvable");
   }
 
   const product = productSnap.data();
-  if (!product.active) throw new Error("Produit indisponible");
 
-  const cart = await getCart(shopId, customerId);
-  const items = [...cart.items];
-  const existing = items.find(i => i.productId === productId);
-  const newQty = (existing?.quantity || 0) + qty;
+  if (String(product.shopId) !== ids.shopId) {
+    throw new Error("Produit introuvable dans cette boutique");
+  }
 
-  if (newQty > Number(product.stock)) throw new Error("Stock insuffisant");
+  if (product.active === false) {
+    throw new Error("Produit indisponible");
+  }
+
+  const price = Number(product.price);
+  const stock = Number(product.stock);
+
+  if (!Number.isFinite(price) || price < 0) {
+    throw new Error("Prix du produit invalide");
+  }
+
+  if (!Number.isFinite(stock) || stock < 0) {
+    throw new Error("Stock du produit invalide");
+  }
+
+  const cart = await getCart(ids.shopId, ids.customerId);
+
+  const items = Array.isArray(cart.items)
+    ? cart.items.map(item => ({ ...item }))
+    : [];
+
+  const productIdString = String(productId);
+
+  const existing = items.find(
+    item => String(item.productId) === productIdString
+  );
+
+  const currentQty = existing
+    ? Number(existing.quantity || 0)
+    : 0;
+
+  const newQty = currentQty + qty;
+
+  if (newQty > stock) {
+    throw new Error("Stock insuffisant");
+  }
 
   if (existing) {
     existing.quantity = newQty;
-    existing.subtotal = newQty * Number(product.price);
+    existing.unitPrice = price;
+    existing.subtotal = newQty * price;
+    existing.name = product.name;
   } else {
     items.push({
-      productId,
+      productId: productIdString,
       name: product.name,
-      unitPrice: Number(product.price),
+      unitPrice: price,
       quantity: qty,
-      subtotal: qty * Number(product.price)
+      subtotal: qty * price
     });
   }
 
-  const total = items.reduce((s, i) => s + Number(i.subtotal), 0);
-  await cartRef(shopId, customerId).set({
-    shopId: String(shopId),
-    customerId: String(customerId),
+  const total = calculateTotal(items);
+
+  const data = {
+    shopId: ids.shopId,
+    customerId: ids.customerId,
     items,
     total,
     updatedAt: timestamp()
-  });
+  };
 
-  return getCart(shopId, customerId);
+  const ref = cartRef(ids.shopId, ids.customerId);
+  const existingCartSnap = await ref.get();
+
+  if (!existingCartSnap.exists) {
+    data.createdAt = timestamp();
+  }
+
+  await ref.set(data, { merge: true });
+
+  return getCart(ids.shopId, ids.customerId);
 }
 
 async function removeItem(shopId, customerId, productId) {
-  const cart = await getCart(shopId, customerId);
-  const items = cart.items.filter(i => i.productId !== productId);
-  const total = items.reduce((s, i) => s + Number(i.subtotal), 0);
+  const ids = validateIds(shopId, customerId);
 
-  await cartRef(shopId, customerId).set({
-    ...cart, items, total, updatedAt: timestamp()
-  });
+  if (!productId) {
+    throw new Error("productId requis");
+  }
 
-  return getCart(shopId, customerId);
+  const cart = await getCart(ids.shopId, ids.customerId);
+
+  const items = cart.items.filter(
+    item => String(item.productId) !== String(productId)
+  );
+
+  const total = calculateTotal(items);
+
+  await cartRef(ids.shopId, ids.customerId).set(
+    {
+      shopId: ids.shopId,
+      customerId: ids.customerId,
+      items,
+      total,
+      updatedAt: timestamp()
+    },
+    { merge: true }
+  );
+
+  return getCart(ids.shopId, ids.customerId);
 }
 
 async function clearCart(shopId, customerId) {
-  await cartRef(shopId, customerId).set({
-    shopId: String(shopId), customerId: String(customerId),
-    items: [], total: 0, updatedAt: timestamp()
-  });
-  return getCart(shopId, customerId);
+  const ids = validateIds(shopId, customerId);
+
+  await cartRef(ids.shopId, ids.customerId).set(
+    {
+      shopId: ids.shopId,
+      customerId: ids.customerId,
+      items: [],
+      total: 0,
+      updatedAt: timestamp()
+    },
+    { merge: true }
+  );
+
+  return getCart(ids.shopId, ids.customerId);
 }
 
-module.exports = { getCart, addItem, removeItem, clearCart };
+module.exports = {
+  getCart,
+  addItem,
+  removeItem,
+  clearCart
+};
