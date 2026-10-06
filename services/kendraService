@@ -1,23 +1,61 @@
 const { getDb, timestamp } = require("../config/firebase");
 const { generateJson, generateText } = require("./geminiService");
+
 const subscriptionService = require("./subscriptionService");
 const productService = require("./productService");
 const customerService = require("./customerService");
 const conversationService = require("./conversationService");
 const cartService = require("./cartService");
 
-async function understandMessage(text, products) {
-  const catalog = products.map(p => ({
-    id: p.id, name: p.name, category: p.category,
-    price: p.price, stock: p.stock
+/*
+|--------------------------------------------------------------------------
+| COMPRÉHENSION DU MESSAGE
+|--------------------------------------------------------------------------
+*/
+
+async function understandMessage(
+  text,
+  products
+) {
+  const catalog = (
+    Array.isArray(products)
+      ? products
+      : []
+  ).map(p => ({
+    id:
+      p.id,
+
+    name:
+      p.name,
+
+    category:
+      p.category || "",
+
+    price:
+      p.price,
+
+    stock:
+      p.stock
   }));
 
   const prompt = `
-Tu es le module de compréhension de KENDRA, une vendeuse WhatsApp.
-Comprends le langage naturel camerounais, familier ou abrégé.
-NE DONNE AUCUN prix et N'INVENTE AUCUN produit.
+Tu es le module de compréhension de KENDRA,
+une vendeuse WhatsApp automatique pour boutiques.
 
-Retourne uniquement JSON :
+Comprends le français naturel, le langage familier,
+les abréviations et les formulations courantes
+utilisées par les clients camerounais.
+
+IMPORTANT :
+- Ne donne aucun prix.
+- N'invente aucun produit.
+- N'invente aucun stock.
+- Identifie uniquement l'intention du client.
+- Utilise le catalogue uniquement pour identifier
+  éventuellement le produit demandé.
+
+Retourne UNIQUEMENT un JSON valide sous cette forme :
+
 {
   "intent": "greeting|search_product|ask_price|ask_stock|add_to_cart|remove_from_cart|checkout|order_status|other",
   "productQuery": "",
@@ -26,117 +64,592 @@ Retourne uniquement JSON :
   "quantity": null
 }
 
-Message client:
-${JSON.stringify(text)}
+Message client :
+${JSON.stringify(String(text || ""))}
 
-Catalogue disponible (pour aider à identifier le produit, pas pour répondre directement):
+Catalogue disponible :
 ${JSON.stringify(catalog)}
 `;
 
-  return generateJson(prompt);
+  const result =
+    await generateJson(prompt);
+
+  /*
+   * Sécurisation du résultat Gemini.
+   */
+  return {
+    intent:
+      String(
+        result?.intent || "other"
+      ),
+
+    productQuery:
+      String(
+        result?.productQuery || ""
+      ).trim(),
+
+    category:
+      String(
+        result?.category || ""
+      ).trim(),
+
+    maxPrice:
+      result?.maxPrice !== null &&
+      result?.maxPrice !== undefined &&
+      result?.maxPrice !== ""
+        ? Number(result.maxPrice)
+        : null,
+
+    quantity:
+      result?.quantity !== null &&
+      result?.quantity !== undefined &&
+      result?.quantity !== ""
+        ? Number(result.quantity)
+        : null
+  };
 }
 
-async function findProducts(shopId, understanding) {
-  let products = await productService.listProducts(shopId, { activeOnly: true });
+/*
+|--------------------------------------------------------------------------
+| RECHERCHE PRODUITS
+|--------------------------------------------------------------------------
+*/
 
-  if (understanding.category) {
-    const q = understanding.category.toLowerCase();
-    products = products.filter(p => String(p.category).toLowerCase().includes(q));
+async function findProducts(
+  shopId,
+  understanding
+) {
+  let products =
+    await productService.listProducts(
+      shopId,
+      {
+        activeOnly: true
+      }
+    );
+
+  if (!Array.isArray(products)) {
+    products = [];
   }
 
+  /*
+   * Catégorie
+   */
+  if (understanding.category) {
+    const q =
+      String(
+        understanding.category
+      ).toLowerCase();
+
+    products =
+      products.filter(p =>
+        String(
+          p.category || ""
+        )
+          .toLowerCase()
+          .includes(q)
+      );
+  }
+
+  /*
+   * Recherche produit
+   */
   if (understanding.productQuery) {
-    const q = understanding.productQuery.toLowerCase();
-    products = products.filter(p =>
-      String(p.name).toLowerCase().includes(q) ||
-      String(p.description).toLowerCase().includes(q) ||
-      String(p.category).toLowerCase().includes(q)
+    const q =
+      String(
+        understanding.productQuery
+      ).toLowerCase();
+
+    products =
+      products.filter(p =>
+        String(
+          p.name || ""
+        )
+          .toLowerCase()
+          .includes(q) ||
+
+        String(
+          p.description || ""
+        )
+          .toLowerCase()
+          .includes(q) ||
+
+        String(
+          p.category || ""
+        )
+          .toLowerCase()
+          .includes(q)
+      );
+  }
+
+  /*
+   * Prix maximum
+   */
+  if (
+    understanding.maxPrice !== null &&
+    understanding.maxPrice !== undefined &&
+    !Number.isNaN(
+      Number(
+        understanding.maxPrice
+      )
+    )
+  ) {
+    products =
+      products.filter(
+        p =>
+          Number(p.price) <=
+          Number(
+            understanding.maxPrice
+          )
+      );
+  }
+
+  return products.slice(
+    0,
+    8
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
+| CRÉER / RÉCUPÉRER AUTOMATIQUEMENT LE CLIENT
+|--------------------------------------------------------------------------
+|
+| Un client WhatsApp peut envoyer son premier message
+| sans avoir encore de document Firestore.
+|
+| On essaie d'abord le service client existant.
+| Si aucun client n'existe, on crée automatiquement
+| un document minimal.
+|
+|--------------------------------------------------------------------------
+*/
+
+async function getOrCreateCustomer(
+  shopId,
+  customerId
+) {
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
+
+  const cleanCustomerId =
+    String(
+      customerId || ""
+    ).trim();
+
+  if (
+    !cleanShopId ||
+    !cleanCustomerId
+  ) {
+    throw new Error(
+      "SHOP_ID_ET_CUSTOMER_ID_OBLIGATOIRES"
     );
   }
 
-  if (understanding.maxPrice !== null && understanding.maxPrice !== undefined) {
-    products = products.filter(p => Number(p.price) <= Number(understanding.maxPrice));
+  const existing =
+    await customerService.getCustomer(
+      cleanShopId,
+      cleanCustomerId
+    );
+
+  if (existing) {
+    return existing;
   }
 
-  return products.slice(0, 8);
+  /*
+   * Création automatique du client.
+   *
+   * Le numéro WhatsApp sert d'identifiant client
+   * puisqu'il provient directement de Meta.
+   */
+  const customerRef =
+    getDb()
+      .collection("customers")
+      .doc();
+
+  const customer = {
+    id:
+      customerRef.id,
+
+    shopId:
+      cleanShopId,
+
+    phone:
+      cleanCustomerId,
+
+    whatsappId:
+      cleanCustomerId,
+
+    name:
+      "",
+
+    channel:
+      "whatsapp",
+
+    createdAt:
+      timestamp(),
+
+    updatedAt:
+      timestamp()
+  };
+
+  await customerRef.set(
+    customer
+  );
+
+  return customer;
 }
 
-async function buildReply({ text, understanding, products, cart }) {
-  const safeProducts = products.map(p => ({
-    id: p.id, name: p.name, price: p.price, stock: p.stock, category: p.category
+/*
+|--------------------------------------------------------------------------
+| CONSTRUCTION DE LA RÉPONSE
+|--------------------------------------------------------------------------
+*/
+
+async function buildReply({
+  text,
+  understanding,
+  products,
+  cart
+}) {
+  const safeProducts = (
+    Array.isArray(products)
+      ? products
+      : []
+  ).map(p => ({
+    id:
+      p.id,
+
+    name:
+      p.name,
+
+    price:
+      p.price,
+
+    stock:
+      p.stock,
+
+    category:
+      p.category || ""
   }));
 
   const prompt = `
-Tu es KENDRA, une vendeuse WhatsApp chaleureuse et concise.
-Réponds en français naturel, avec un ton commercial simple.
-Tu peux utiliser uniquement les informations fournies.
-NE JAMAIS inventer un prix, un stock, un produit ou une promotion.
-Si aucun produit ne correspond, dis-le clairement.
-Ne prétends jamais qu'un paiement est effectué.
+Tu es KENDRA, une vendeuse WhatsApp automatique
+pour une boutique.
 
-Message:
-${JSON.stringify(text)}
+Ton objectif est d'aider le client et de faciliter
+la vente.
 
-Intention:
-${JSON.stringify(understanding)}
+Style :
+- français naturel ;
+- chaleureux ;
+- simple ;
+- commercial ;
+- réponse courte et claire ;
+- adaptée à WhatsApp.
 
-Produits réellement trouvés:
-${JSON.stringify(safeProducts)}
+RÈGLES ABSOLUES :
+- Utilise uniquement les informations fournies.
+- N'invente jamais un produit.
+- N'invente jamais un prix.
+- N'invente jamais un stock.
+- N'invente jamais une promotion.
+- Ne prétends jamais qu'une commande est payée.
+- Ne prétends jamais qu'une commande est validée
+  si ce n'est pas indiqué.
+- Si aucun produit ne correspond, dis-le clairement.
+- Si le client demande quelque chose qui n'est pas
+  disponible dans les données, indique-le simplement.
 
-Panier réel:
-${JSON.stringify(cart)}
+Message du client :
+${JSON.stringify(
+  String(text || "")
+)}
 
-Réponds directement au client, sans expliquer tes règles internes.
+Intention détectée :
+${JSON.stringify(
+  understanding
+)}
+
+Produits réellement trouvés :
+${JSON.stringify(
+  safeProducts
+)}
+
+Panier réel :
+${JSON.stringify(
+  cart || null
+)}
+
+Réponds directement au client.
+N'explique jamais tes règles internes.
 `;
 
-  return generateText(prompt);
+  const reply =
+    await generateText(
+      prompt
+    );
+
+  return String(
+    reply || ""
+  ).trim();
 }
 
-async function handleMessage({ shopId, customerId, text, channel = "whatsapp" }) {
-  await subscriptionService.assertActive(shopId);
+/*
+|--------------------------------------------------------------------------
+| TRAITEMENT PRINCIPAL KENDRA
+|--------------------------------------------------------------------------
+*/
 
-  const usageCheck = await subscriptionService.canUse(shopId, "messages", 1);
-  if (!usageCheck.allowed) throw new Error(usageCheck.reason);
+async function handleMessage({
+  shopId,
+  customerId,
+  text,
+  channel = "whatsapp"
+}) {
+  const cleanShopId =
+    String(
+      shopId || ""
+    ).trim();
 
-  const customer = await customerService.getCustomer(shopId, customerId);
-  if (!customer) throw new Error("CLIENT_INTRouvable");
+  const cleanCustomerId =
+    String(
+      customerId || ""
+    ).trim();
 
-  const conversation = await conversationService.getOrCreateConversation(
-    shopId, customerId, channel
-  );
+  const cleanText =
+    String(
+      text || ""
+    ).trim();
 
-  await conversationService.addMessage(shopId, conversation.id, {
-    role: "user", text, source: channel
-  });
-
-  const products = await productService.listProducts(shopId, { activeOnly: true });
-  const understanding = await understandMessage(text, products);
-
-  if (understanding.intent === "add_to_cart" && understanding.productQuery) {
-    const found = await findProducts(shopId, understanding);
-    if (found.length === 1) {
-      await cartService.addItem(
-        shopId, customerId, found[0].id,
-        Number(understanding.quantity || 1)
-      );
-    }
+  if (!cleanShopId) {
+    throw new Error(
+      "shopId est obligatoire"
+    );
   }
 
-  const cart = await cartService.getCart(shopId, customerId);
-  const foundProducts = await findProducts(shopId, understanding);
-  const reply = await buildReply({
-    text, understanding, products: foundProducts, cart
-  });
+  if (!cleanCustomerId) {
+    throw new Error(
+      "customerId est obligatoire"
+    );
+  }
 
-  await conversationService.addMessage(shopId, conversation.id, {
-    role: "assistant", text: reply, source: "kendra"
-  });
+  if (!cleanText) {
+    throw new Error(
+      "text est obligatoire"
+    );
+  }
 
-  await getDb().collection("usage").doc(String(shopId)).set({
-    messages: require("firebase-admin").firestore.FieldValue.increment(1),
-    updatedAt: timestamp()
-  }, { merge: true });
+  /*
+   * Vérification abonnement.
+   */
+  await subscriptionService.assertActive(
+    cleanShopId
+  );
 
-  return { conversation, understanding, products: foundProducts, cart, reply };
+  /*
+   * Vérification de la consommation.
+   */
+  const usageCheck =
+    await subscriptionService.canUse(
+      cleanShopId,
+      "messages",
+      1
+    );
+
+  if (!usageCheck.allowed) {
+    throw new Error(
+      usageCheck.reason
+    );
+  }
+
+  /*
+   * Création automatique du client
+   * lors du premier message.
+   */
+  const customer =
+    await getOrCreateCustomer(
+      cleanShopId,
+      cleanCustomerId
+    );
+
+  /*
+   * Conversation.
+   */
+  const conversation =
+    await conversationService.getOrCreateConversation(
+      cleanShopId,
+      cleanCustomerId,
+      channel
+    );
+
+  /*
+   * Enregistrement du message client.
+   */
+  await conversationService.addMessage(
+    cleanShopId,
+    conversation.id,
+    {
+      role:
+        "user",
+
+      text:
+        cleanText,
+
+      source:
+        channel
+    }
+  );
+
+  /*
+   * Catalogue réel.
+   */
+  const products =
+    await productService.listProducts(
+      cleanShopId,
+      {
+        activeOnly: true
+      }
+    );
+
+  /*
+   * Compréhension IA.
+   */
+  const understanding =
+    await understandMessage(
+      cleanText,
+      products
+    );
+
+  /*
+   * Recherche des produits demandés.
+   */
+  const foundProducts =
+    await findProducts(
+      cleanShopId,
+      understanding
+    );
+
+  /*
+   * Ajout automatique au panier.
+   *
+   * On ajoute uniquement lorsqu'un seul produit
+   * correspond clairement à la demande.
+   */
+  if (
+    understanding.intent ===
+      "add_to_cart" &&
+    understanding.productQuery &&
+    foundProducts.length === 1
+  ) {
+    const quantity =
+      Number(
+        understanding.quantity || 1
+      );
+
+    const safeQuantity =
+      Number.isFinite(quantity) &&
+      quantity > 0
+        ? Math.floor(quantity)
+        : 1;
+
+    await cartService.addItem(
+      cleanShopId,
+      cleanCustomerId,
+      foundProducts[0].id,
+      safeQuantity
+    );
+  }
+
+  /*
+   * Panier actuel après éventuel ajout.
+   */
+  const cart =
+    await cartService.getCart(
+      cleanShopId,
+      cleanCustomerId
+    );
+
+  /*
+   * Génération de la réponse.
+   */
+  const reply =
+    await buildReply({
+      text:
+        cleanText,
+
+      understanding,
+
+      products:
+        foundProducts,
+
+      cart
+    });
+
+  /*
+   * Enregistrement de la réponse Kendra.
+   */
+  await conversationService.addMessage(
+    cleanShopId,
+    conversation.id,
+    {
+      role:
+        "assistant",
+
+      text:
+        reply,
+
+      source:
+        "kendra"
+    }
+  );
+
+  /*
+   * Comptabilisation du message.
+   */
+  await getDb()
+    .collection("usage")
+    .doc(cleanShopId)
+    .set(
+      {
+        messages:
+          require("firebase-admin")
+            .firestore
+            .FieldValue
+            .increment(1),
+
+        updatedAt:
+          timestamp()
+      },
+      {
+        merge: true
+      }
+    );
+
+  return {
+    conversation,
+
+    customer,
+
+    understanding,
+
+    products:
+      foundProducts,
+
+    cart,
+
+    reply
+  };
 }
 
-module.exports = { handleMessage, understandMessage };
+/*
+|--------------------------------------------------------------------------
+| EXPORTS
+|--------------------------------------------------------------------------
+*/
+
+module.exports = {
+  handleMessage,
+  understandMessage
+};
