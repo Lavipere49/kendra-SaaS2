@@ -151,10 +151,10 @@ async function getShopsByOwner(
 
 /*
 |--------------------------------------------------------------------------
-| TROUVER UNE BOUTIQUE PAR PHONE NUMBER ID META
+| TROUVER UNE BOUTIQUE PAR IDENTIFIANT WHATSAPP
 |--------------------------------------------------------------------------
 |
-| Meta envoie le Phone Number ID dans le webhook.
+| Evolution API fournit l’identifiant de l’instance dans le webhook.
 |
 | Exemple :
 |
@@ -382,6 +382,27 @@ async function getWhatsAppConfig(
 
 /*
 |--------------------------------------------------------------------------
+| TROUVER UNE BOUTIQUE PAR INSTANCE EVOLUTION
+|--------------------------------------------------------------------------
+*/
+
+async function getShopByEvolutionInstanceName(instanceName) {
+  const clean = String(instanceName || "").trim();
+  if (!clean) return null;
+
+  const snap = await shopsRef()
+    .where("whatsapp.evolutionInstanceName", "==", clean)
+    .limit(1)
+    .get();
+
+  if (snap.empty) return null;
+
+  const doc = snap.docs[0];
+  return { id: doc.id, ...doc.data() };
+}
+
+/*
+|--------------------------------------------------------------------------
 | RÉSOUDRE LA BOUTIQUE KENDRA COURANTE
 |--------------------------------------------------------------------------
 */
@@ -453,3 +474,13 @@ async function resolveCurrentShop() {
 */
 
 module.exports = {
+  createShop,
+  getShop,
+  updateShop,
+  getShopsByOwner,
+  getShopByWhatsAppPhoneNumberId,
+  getShopByEvolutionInstanceName,
+  saveWhatsAppConfig,
+  getWhatsAppConfig,
+  resolveCurrentShop
+};
