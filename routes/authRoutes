@@ -1,5 +1,5 @@
 const router = require("express").Router();
-const { registerMerchant, loginMerchant } = require("../services/authService");
+const { registerMerchant, loginMerchant, refreshIdToken } = require("../services/authService");
 
 router.post("/register", async (req, res) => {
   try {
@@ -20,3 +20,12 @@ router.post("/login", async (req, res) => {
 });
 
 module.exports = router;
+
+router.post("/refresh", async (req, res) => {
+  try {
+    const result = await refreshIdToken(req.body?.refreshToken);
+    res.json({ success: true, ...result });
+  } catch (e) {
+    res.status(401).json({ success: false, error: e.message });
+  }
+});
