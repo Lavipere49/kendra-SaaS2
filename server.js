@@ -39,11 +39,37 @@ const PORT = Number(process.env.PORT) || 3000;
 // Middlewares
 // --------------------------------------------------
 
-app.use(
-  cors({
-    origin: process.env.CLIENT_ORIGIN || "*",
-  })
-);
+const configuredOrigins = String(process.env.CLIENT_ORIGIN || "")
+  .split(",")
+  .map((value) => value.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser/server-to-server requests.
+    if (!origin) return callback(null, true);
+
+    // Explicitly allow the Kendra Netlify frontend.
+    if (configuredOrigins.length === 0 || configuredOrigins.includes("*")) {
+      return callback(null, true);
+    }
+
+    if (configuredOrigins.includes(origin.replace(/\/$/, ""))) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("CORS_ORIGIN_NOT_ALLOWED"));
+  },
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
+  optionsSuccessStatus: 204,
+  credentials: false
+};
+
+app.use(cors(corsOptions));
+// Firebase Bearer tokens trigger a browser preflight (OPTIONS).
+// Handle it before the API routers so Netlify never sees a CORS failure.
+app.options("*", cors(corsOptions));
 
 app.use(express.json({ limit: "10mb" }));
 
@@ -70,9 +96,8 @@ app.get("/api/health", (req, res) => {
     database: "firestore",
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     whatsappConfigured: Boolean(
-      process.env.META_APP_ID &&
-      process.env.META_APP_SECRET &&
-      process.env.META_SYSTEM_USER_ACCESS_TOKEN
+      process.env.EVOLUTION_API_URL &&
+      process.env.EVOLUTION_API_KEY
     ),
   });
 });
@@ -95,9 +120,8 @@ app.get("/api/public-config", (req, res) => {
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
 
     whatsappConfigured: Boolean(
-      process.env.META_APP_ID &&
-      process.env.META_APP_SECRET &&
-      process.env.META_SYSTEM_USER_ACCESS_TOKEN
+      process.env.EVOLUTION_API_URL &&
+      process.env.EVOLUTION_API_KEY
     ),
   });
 });
@@ -173,10 +197,8 @@ app.listen(PORT, "0.0.0.0", () => {
     process.env.GEMINI_API_KEY ? "configured" : "not configured"
   );
   console.log(
-    "WhatsApp:",
-    process.env.META_APP_ID &&
-    process.env.META_APP_SECRET &&
-    process.env.META_SYSTEM_USER_ACCESS_TOKEN
+    "WhatsApp / Evolution API:",
+    process.env.EVOLUTION_API_URL && process.env.EVOLUTION_API_KEY
       ? "configured"
       : "not configured"
   );
