@@ -54,12 +54,8 @@ function webhookUrl() {
   const base = String(
     process.env.KENDRA_PUBLIC_URL ||
     process.env.BACKEND_PUBLIC_URL ||
-    ""
+    "https://kendra-saas2.onrender.com"
   ).trim().replace(/\/$/, "");
-
-  if (!base) {
-    throw new Error("KENDRA_PUBLIC_URL_MANQUANTE");
-  }
 
   const url = `${base}/api/whatsapp/evolution/webhook`;
   if (!WEBHOOK_SECRET) return url;
@@ -263,38 +259,25 @@ async function getQr(instanceName, instanceToken) {
 }
 
 async function startConnection(instanceName, instanceToken) {
-  const hook = webhookUrl();
-  const body = {
-    webhook: hook,
-    webhookUrl: hook,
-    subscribe: [
-      "QRCODE_UPDATED",
-      "CONNECTION_UPDATE",
-      "MESSAGES_UPSERT",
-      "MESSAGES_UPDATE",
-      "SEND_MESSAGE"
-    ]
-  };
+  // Evolution API 2.x exposes the connection/QR endpoint as GET.
+  // The previous implementation used POST here, which causes:
+  // "Cannot POST /instance/connect/:instance".
+  const path = `/instance/connect/${encodeURIComponent(instanceName)}`;
 
-  const paths = [
-    `/instance/connect/${encodeURIComponent(instanceName)}`,
-    `/instance/connect/${encodeURIComponent(instanceName)}?number=`
-  ];
-
-  let lastError;
-  for (const path of paths) {
-    try {
-      const data = await evolutionRequest(path, {
-        method: "POST",
-        body: JSON.stringify(body)
-      }, instanceToken);
-      return data;
-    } catch (error) {
-      lastError = error;
+  try {
+    return await evolutionRequest(
+      path,
+      { method: "GET" },
+      instanceToken
+    );
+  } catch (error) {
+    // If the instance is already connected/open, this is not a fatal error.
+    const msg = String(error.message || "");
+    if (/already|open|connected|logged/i.test(msg)) {
+      return { success: true, alreadyConnected: true };
     }
+    throw error;
   }
-
-  throw lastError || new Error("EVOLUTION_CONNECT_FAILED");
 }
 
 async function getState(instanceName, instanceToken) {
@@ -402,16 +385,6 @@ async function requestPairingCode(shopId, phone) {
     {
       path: `/instance/connect/${encoded}?number=${encodeURIComponent(number)}`,
       method: "GET"
-    },
-    {
-      path: `/instance/connect/${encoded}?number=${encodeURIComponent(number)}`,
-      method: "POST",
-      body: JSON.stringify({ number })
-    },
-    {
-      path: `/instance/pair/${encoded}`,
-      method: "POST",
-      body: JSON.stringify({ number, phone: number })
     }
   ];
 
