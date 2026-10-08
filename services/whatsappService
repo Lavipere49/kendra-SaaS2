@@ -372,14 +372,26 @@ async function requestPairingCode(shopId, phone) {
   const number = normalizeNumber(phone);
   if (!number) throw new Error("NUMERO_WHATSAPP_MANQUANT");
 
-  const whatsapp = shop.whatsapp || {};
-  const instanceName = String(whatsapp.evolutionInstanceName || "").trim();
-  const instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+  let whatsapp = shop.whatsapp || {};
+  let instanceName = String(whatsapp.evolutionInstanceName || "").trim();
+  let instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+
+  // Le code de liaison peut être demandé directement après l'ouverture de la
+  // fenêtre. Si aucune instance n'existe encore, on la crée et on démarre la
+  // connexion avant de demander le pairing code.
+  if (!instanceName || !instanceToken) {
+    const bootstrap = await connectWhatsApp(shopId, { phoneNumber: number });
+    instanceName = String(bootstrap.instanceName || "").trim();
+    const refreshedShop = await getShop(shopId);
+    whatsapp = refreshedShop?.whatsapp || {};
+    instanceToken = String(whatsapp.evolutionInstanceToken || "").trim();
+  }
+
   if (!instanceName || !instanceToken) {
     throw new Error("INSTANCE_EVOLUTION_MANQUANTE");
   }
 
-  // Evolution API 2.x commonly supports /instance/connect/{instance}?number=...
+  // Evolution API 2.x expose le pairing code via GET /instance/connect/{instance}?number=...
   const encoded = encodeURIComponent(instanceName);
   const attempts = [
     {
